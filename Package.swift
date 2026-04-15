@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "SwallowScreen",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     products: [
         .executable(
