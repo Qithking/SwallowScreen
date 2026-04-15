@@ -33,16 +33,13 @@ class WindowMover: ObservableObject {
     func startMonitoring() -> Bool {
         guard !isMonitoring else { return true }
         
-        // 检查权限
         if !AXIsProcessTrusted() {
-            print("⚠️ 没有辅助功能权限，无法控制窗口")
             requestAccessibilityPermission()
             return false
         }
         
         isMonitoring = true
         
-        // 在主线程创建 Timer
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
@@ -52,7 +49,6 @@ class WindowMover: ObservableObject {
             }
             RunLoop.current.add(self.timer!, forMode: .common)
         }
-        print("✅ WindowMover 监控已启动")
         return true
     }
     
@@ -69,10 +65,8 @@ class WindowMover: ObservableObject {
     private func checkAndEnforcePinnedWindows() {
         guard let modelContext = modelContext else { return }
         
-        // 检查权限
         if !AXIsProcessTrusted() {
             if hasAccessibilityPermission {
-                print("⚠️ 辅助功能权限被撤销")
                 hasAccessibilityPermission = false
             }
             return
@@ -96,7 +90,7 @@ class WindowMover: ObservableObject {
                 checkWindowPosition(pid: pid, targetFrame: targetScreenFrame, appBundleID: appInfo.bundleIdentifier, screenID: targetScreenID)
             }
         } catch {
-            print("❌ Error: \(error)")
+            // 静默处理错误
         }
     }
     
@@ -111,10 +105,12 @@ class WindowMover: ObservableObject {
             return
         }
         
+        let mouseLocation = NSEvent.mouseLocation
+        let mouseScreen = getScreenContainingPoint(mouseLocation)
+        
         for window in windows {
             let windowID = "\(pid)-\(window.hashValue)"
             
-            // 获取窗口位置
             var positionValue: CFTypeRef?
             guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
                   let posVal = positionValue else {
@@ -124,21 +120,12 @@ class WindowMover: ObservableObject {
             var axPosition = CGPoint.zero
             AXValueGetValue(posVal as! AXValue, .cgPoint, &axPosition)
             
-            let previousPosition = previousWindowPositions[windowID]
-            
-            // 获取鼠标释放时的位置（当前鼠标位置）
-            let mouseLocation = NSEvent.mouseLocation
-            
-            // 判断鼠标在哪个屏幕上
-            let mouseScreen = getScreenContainingPoint(mouseLocation)
-            
             // 如果窗口位置没变，跳过
-            if let prev = previousPosition,
+            if let prev = previousWindowPositions[windowID],
                prev.x == axPosition.x && prev.y == axPosition.y {
                 continue
             }
             
-            // 窗口位置发生变化
             previousWindowPositions[windowID] = axPosition
             
             // 如果已经在移动中，跳过
@@ -147,18 +134,15 @@ class WindowMover: ObservableObject {
             }
             
             // 检查鼠标是否在目标屏幕上
-            if let currentScreen = mouseScreen {
-                let currentScreenID = getScreenID(currentScreen)
-                
-                // 鼠标在正确的屏幕上，不干预
-                if currentScreenID == screenID {
-                    continue
-                }
+            if let currentScreen = mouseScreen,
+               let currentScreenID = getScreenID(currentScreen),
+               currentScreenID == screenID {
+                continue
             }
             
             // 鼠标不在目标屏幕，移回目标屏幕
             movingWindows.insert(windowID)
-            moveWindowToScreenCenter(window, targetFrame: targetFrame, windowID: windowID, appBundleID: appBundleID)
+            moveWindowToScreenCenter(window, targetFrame: targetFrame, windowID: windowID)
         }
     }
     
@@ -188,7 +172,7 @@ class WindowMover: ObservableObject {
     }
     
     /// 将窗口移到屏幕中心
-    private func moveWindowToScreenCenter(_ window: AXUIElement, targetFrame: CGRect, windowID: String, appBundleID: String) {
+    private func moveWindowToScreenCenter(_ window: AXUIElement, targetFrame: CGRect, windowID: String) {
         var sizeValue: CFTypeRef?
         AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
         
@@ -197,7 +181,6 @@ class WindowMover: ObservableObject {
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
         }
         
-        // 计算屏幕中心位置
         let centerX = targetFrame.midX - size.width / 2
         let centerY = targetFrame.midY - size.height / 2
         
@@ -206,12 +189,8 @@ class WindowMover: ObservableObject {
             let result = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
             if result == .success {
                 lastMovedWindows.insert(windowID)
-                print("🔒 窗口已移回指定屏幕中心: \(appBundleID)")
-                
-                // 从移动中列表移除
                 movingWindows.remove(windowID)
                 
-                // 2秒后允许再次移动
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                     self?.lastMovedWindows.remove(windowID)
                 }

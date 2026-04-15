@@ -158,22 +158,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func setupWindowMover() {
-        guard let container = modelContainer else {
-            print("❌ WindowMover: modelContainer 为空")
-            return
-        }
+        guard let container = modelContainer else { return }
         
         windowMover = WindowMover()
         windowMover?.configure(modelContext: container.mainContext)
         
         if windowMover?.startMonitoring() == true {
-            print("✅ WindowMover 监控已启动")
-            // 监控启动成功后停止权限检查定时器
             permissionCheckTimer?.invalidate()
             permissionCheckTimer = nil
         } else {
-            print("⚠️ WindowMover 监控未启动，开始权限检查定时器")
-            // 启动权限检查定时器
             startPermissionCheckTimer()
         }
     }
@@ -190,9 +183,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         permissionCheckTimer?.invalidate()
         
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            // 检查辅助功能权限
             if AXIsProcessTrusted() {
-                print("✅ 辅助功能权限已授予，重新初始化 WindowMover")
                 self?.stopWindowMoverMonitoring()
                 self?.setupWindowMover()
             }
