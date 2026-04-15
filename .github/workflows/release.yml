@@ -5,20 +5,30 @@ on:
     tags:
       - 'v*'
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 permissions:
   contents: write
 
 jobs:
   release:
     runs-on: macos-14
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-deriveddata-${{ hashFiles('SwallowScreen/**/*.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-deriveddata-
 
       - name: Build
         run: |
@@ -45,12 +55,12 @@ jobs:
             "SwallowScreen-${{ github.ref_name }}.dmg" \
             "./DerivedData/Build/Products/Release/SwallowScreen.app"
 
-      - name: Release
+      - name: Upload DMG
         uses: softprops/action-gh-release@v2
         with:
           body: |
             ## SwallowScreen
-            
+
             多屏幕窗口管理工具
 
             ### 功能
