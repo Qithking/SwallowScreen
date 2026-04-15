@@ -4,7 +4,23 @@
 
     ],
     "dependencies" : [
-
+      {
+        "basedOn" : null,
+        "packageRef" : {
+          "identity" : "swift-collections",
+          "kind" : "remoteSourceControl",
+          "location" : "https://github.com/apple/swift-collections",
+          "name" : "swift-collections"
+        },
+        "state" : {
+          "checkoutState" : {
+            "revision" : "6675bc0ff86e61436e615df6fc5174e043e57924",
+            "version" : "1.4.1"
+          },
+          "name" : "sourceControlCheckout"
+        },
+        "subpath" : "swift-collections"
+      }
     ],
     "prebuilts" : [
 

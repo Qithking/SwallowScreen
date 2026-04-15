@@ -8,6 +8,7 @@ VERSION=$(grep -A1 CFBundleShortVersionString SwallowScreen/Info.plist | tail -1
 TAG="v${VERSION}"
 GITHUB_REPO="Qithking/SwallowScreen"
 GITEE_REPO=""
+STAGE="/tmp/${APP_NAME,,}-release-${VERSION}"
 
 echo "=== ${APP_NAME} Release ${TAG} ==="
 echo ""
@@ -18,23 +19,43 @@ if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
     exit 1
 fi
 
-# Build for each architecture separately
-echo "[1/5] Building binaries..."
+# Detect architecture
+ARCH=$(uname -m)
+echo "Current architecture: $ARCH"
+
+# Clean old builds
+echo "[1/6] Cleaning old builds..."
+rm -rf .build
+rm -rf "$STAGE"
+
+# Build for Apple Silicon
+echo "[2/6] Building Apple Silicon (arm64)..."
 swift build -c release --arch arm64
-echo "  Built arm64"
+ARM64_BIN=$(find .build -name "${APP_NAME}" -type f -executable 2>/dev/null | head -1)
+if [ -z "$ARM64_BIN" ]; then
+    echo "Error: Apple Silicon binary not found"
+    exit 1
+fi
+echo "  Built: $ARM64_BIN"
+
+# Build for Intel
+echo "[3/6] Building Intel (x86_64)..."
 swift build -c release --arch x86_64
-echo "  Built x86_64"
+X86_BIN=$(find .build -name "${APP_NAME}" -type f -executable 2>/dev/null | head -1)
+if [ -z "$X86_BIN" ]; then
+    echo "Error: Intel binary not found"
+    exit 1
+fi
+echo "  Built: $X86_BIN"
 
 # Package app bundles
-echo "[2/5] Packaging apps..."
-STAGE="/tmp/${APP_NAME,,}-release-${VERSION}"
-rm -rf "$STAGE"
+echo "[4/6] Packaging apps..."
 
 for label in Apple-Silicon Intel; do
     if [ "$label" = "Apple-Silicon" ]; then
-        BIN=".build/arm64-apple-macosx/release/${APP_NAME}"
+        BIN="$ARM64_BIN"
     else
-        BIN=".build/x86_64-apple-macosx/release/${APP_NAME}"
+        BIN="$X86_BIN"
     fi
     APP_DIR="${STAGE}/${label}/${APP_NAME}.app/Contents"
     mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
@@ -42,11 +63,11 @@ for label in Apple-Silicon Intel; do
     cp "SwallowScreen/Info.plist" "$APP_DIR/"
     cp -r "SwallowScreen/Assets.xcassets" "$APP_DIR/Resources/"
     cp "SwallowScreen/HelpView.html" "$APP_DIR/Resources/"
-    # Skip code signing for now
+    echo "  Packaged ${label}"
 done
 
 # Create DMGs
-echo "[3/5] Creating DMGs..."
+echo "[5/6] Creating DMGs..."
 for label in Apple-Silicon Intel; do
     DMG_NAME="${APP_NAME}-${TAG}-${label}.dmg"
     DMG_DIR="${STAGE}/dmg-${label}"
@@ -59,7 +80,7 @@ for label in Apple-Silicon Intel; do
 done
 
 # Git commit, tag, push
-echo "[4/5] Pushing tag ${TAG}..."
+echo "[6/6] Pushing tag and publishing release..."
 git add -A
 git diff --cached --quiet || git commit -m "${TAG}"
 git tag "$TAG" 2>/dev/null || true
@@ -69,7 +90,7 @@ if [ -n "$GITEE_REPO" ]; then
 fi
 
 # Upload to GitHub release
-echo "[5/5] Publishing release to GitHub..."
+echo "Publishing release to GitHub..."
 RELEASE_NOTES="## ${APP_NAME} ${TAG}
 
 多屏幕窗口管理工具
@@ -106,7 +127,7 @@ echo "  GitHub release done"
 
 # Upload to Gitee if configured
 if [ -n "$GITEE_REPO" ] && [ -n "$GITEE_TOKEN" ]; then
-    echo "  Publishing release to Gitee..."
+    echo "Publishing release to Gitee..."
     GITEE_RELEASE_RESP=$(curl -s -X POST \
         "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases" \
         -H "Content-Type: application/json" \
