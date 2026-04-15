@@ -38,6 +38,7 @@ jobs:
       - name: Create DMG
         run: |
           brew install create-dmg
+          VERSION="${GITHUB_REF_NAME#v}"
           create-dmg \
             --volname "SwallowScreen" \
             --window-pos 200 120 \
@@ -46,24 +47,17 @@ jobs:
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
-            --codesign-method none \
-            "SwallowScreen-${{ github.ref_name }}.dmg" \
+            --notarize \
+            --no-internet-permission \
+            "SwallowScreen-${VERSION}.dmg" \
             "${{ steps.find_app.outputs.app_path }}"
-
-      - name: Get Version
-        id: version
-        run: |
-          VERSION="${TAG_NAME#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-        env:
-          TAG_NAME: ${{ github.ref_name }}
 
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
           body: |
-            ## SwallowScreen ${{ steps.version.outputs.version }}
-
+            ## SwallowScreen
+            
             多屏幕窗口管理工具
 
             ### 功能
@@ -71,7 +65,7 @@ jobs:
             - 多屏幕支持：为每个应用指定首选显示屏幕
             - 全局快捷键：快速设置前台应用的屏幕
             - 菜单栏应用：不占用 Dock 空间
-          files: SwallowScreen-${{ steps.version.outputs.version }}.dmg
+          files: SwallowScreen-*.dmg
           draft: false
           prerelease: false
         env:
