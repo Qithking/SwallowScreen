@@ -21,6 +21,7 @@ struct AppPopoverView: View {
     @State private var selectedAppForConfig: SystemApp?
     
     @State private var settings: AppSettings?
+    @State private var showWelcomeTip: Bool = false
     
     var body: some View {
         ZStack {
@@ -29,6 +30,10 @@ struct AppPopoverView: View {
                 .ignoresSafeArea()
             
             VStack(spacing: 0) {
+                // 首次使用提示
+                if showWelcomeTip {
+                    welcomeTipView
+                }
                 // 第一部分：搜索区域
                 searchArea
                 
@@ -47,6 +52,68 @@ struct AppPopoverView: View {
         .onAppear {
             setupSettings()
             refreshScreens()
+            checkWelcomeTip()
+        }
+    }
+    
+    // MARK: - 欢迎提示视图
+    private var welcomeTipView: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Image(systemName: "lightbulb.fill")
+                    .foregroundColor(.yellow)
+                Text("使用提示")
+                    .font(.headline)
+                Spacer()
+                Button(action: {
+                    showWelcomeTip = false
+                }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            
+            Text("搜索并选择应用，然后为其指定显示屏幕。软件启动时会自动恢复到预设屏幕。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.leading)
+            
+            HStack(spacing: 16) {
+                Button("不再显示") {
+                    showWelcomeTip = false
+                    updateSetting { $0.showHelpTips = false }
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                Button("知道了") {
+                    showWelcomeTip = false
+                }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundColor(.accentColor)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.accentColor.opacity(0.1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 12)
+        .padding(.top, 12)
+    }
+    
+    private func checkWelcomeTip() {
+        if let settings = settings, settings.showHelpTips {
+            showWelcomeTip = true
         }
     }
     
@@ -85,8 +152,12 @@ struct AppPopoverView: View {
                         app: app,
                         screens: screenManager.screens,
                         selectedScreen: getSelectedScreen(for: app),
+                        isPinToScreen: getIsPinToScreen(for: app),
                         onScreenSelected: { screenInfo in
                             configureApp(app: app, screen: screenInfo)
+                        },
+                        onPinToScreenChanged: { pinned in
+                            updatePinToScreen(app: app, pinned: pinned)
                         }
                     )
                     
@@ -180,14 +251,40 @@ struct AppPopoverView: View {
         }
     }
     
+    private func getIsPinToScreen(for app: SystemApp) -> Bool {
+        if let appInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+            return appInfo.pinToScreen
+        }
+        return false
+    }
+    
+    private func updatePinToScreen(app: SystemApp, pinned: Bool) {
+        if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+            existingInfo.updatePinToScreen(pinned)
+        } else {
+            let newInfo = AppInfo(
+                bundleIdentifier: app.bundleIdentifier,
+                appName: app.name,
+                iconData: appManager.getIconData(for: app),
+                pinToScreen: pinned
+            )
+            modelContext.insert(newInfo)
+        }
+    }
+    
+    private func updateSetting(_ update: (AppSettings) -> Void) {
+        if let settings = appSettings.first {
+            update(settings)
+            settings.updatedAt = Date()
+        }
+    }
+    
     private func openSettingsWindow() {
         NotificationCenter.default.post(name: .openSettingsWindow, object: nil)
     }
     
     private func openHelp() {
-        if let url = URL(string: "https://github.com/thking/SwallowScreen") {
-            NSWorkspace.shared.open(url)
-        }
+        NotificationCenter.default.post(name: .openHelpWindow, object: nil)
     }
 }
 
@@ -196,12 +293,25 @@ struct AppRowView: View {
     let app: SystemApp
     let screens: [ScreenInfo]
     let selectedScreen: ScreenInfo?
+    let isPinToScreen: Bool
     let onScreenSelected: (ScreenInfo?) -> Void
+    let onPinToScreenChanged: (Bool) -> Void
     
     @State private var isHovering = false
     
     var body: some View {
         HStack(spacing: 8) {
+            // 固定屏幕图标
+            Button(action: {
+                onPinToScreenChanged(!isPinToScreen)
+            }) {
+                Image(systemName: isPinToScreen ? "pin.circle.fill" : "pin.circle")
+                    .font(.system(size: 16))
+                    .foregroundColor(isPinToScreen ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("固定屏幕：开启后该应用只能在此屏幕显示")
+            
             // 应用图标
             if let icon = app.icon {
                 Image(nsImage: icon)
@@ -251,9 +361,6 @@ struct AppRowView: View {
                         .font(.caption)
                         .foregroundColor(selectedScreen != nil ? .primary : .secondary)
                         .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8))
-                        .foregroundColor(.secondary)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -262,6 +369,7 @@ struct AppRowView: View {
                         .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
                 )
             }
+            .menuStyle(.borderlessButton)
             .fixedSize()
         }
         .padding(.horizontal, 12)
@@ -276,6 +384,7 @@ struct AppRowView: View {
 // MARK: - 通知名称
 extension Notification.Name {
     static let openSettingsWindow = Notification.Name("openSettingsWindow")
+    static let openHelpWindow = Notification.Name("openHelpWindow")
 }
 
 #Preview {

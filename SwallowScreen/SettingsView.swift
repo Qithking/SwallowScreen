@@ -16,8 +16,6 @@ struct SettingsView: View {
     @Query private var appSettings: [AppSettings]
     
     @State private var launchAtLogin: Bool = false
-    @State private var enableAutoMove: Bool = true
-    @State private var checkInterval: Double = 2.0
     @State private var showHelpTips: Bool = true
     
     // 快捷键相关状态
@@ -56,23 +54,6 @@ struct SettingsView: View {
                                 updateSetting { $0.launchAtLogin = newValue }
                                 setLaunchAtLogin(enabled: newValue)
                             }
-                        
-                        Toggle("启用自动窗口移动", isOn: $enableAutoMove)
-                            .onChange(of: enableAutoMove) { _, newValue in
-                                updateSetting { $0.enableAutoMove = newValue }
-                            }
-                        
-                        HStack {
-                            Text("窗口位置检查间隔")
-                            Spacer()
-                            Slider(value: $checkInterval, in: 1...10, step: 0.5)
-                                .frame(width: 120)
-                            Text("\(checkInterval, specifier: "%.1f")秒")
-                                .frame(width: 40)
-                                .onChange(of: checkInterval) { _, newValue in
-                                    updateSetting { $0.checkInterval = newValue }
-                                }
-                        }
                     } header: {
                         Text("基础设置")
                     }
@@ -138,7 +119,7 @@ struct SettingsView: View {
                 .scrollContentBackground(.hidden)
             }
         }
-        .frame(width: 400, height: 480)
+        .frame(width: 400, height: 400)
         .onAppear {
             loadSettings()
         }
@@ -195,8 +176,6 @@ struct SettingsView: View {
     private func loadSettings() {
         if let settings = appSettings.first {
             launchAtLogin = settings.launchAtLogin
-            enableAutoMove = settings.enableAutoMove
-            checkInterval = settings.checkInterval
             showHelpTips = settings.showHelpTips
             
             // 加载快捷键设置
@@ -355,6 +334,7 @@ struct HotkeyRecorderView: View {
 extension Notification.Name {
     static let hotkeysUpdated = Notification.Name("hotkeysUpdated")
     static let recordingHotkey = Notification.Name("recordingHotkey")
+    static let appSettingsChanged = Notification.Name("appSettingsChanged")
 }
 
 #Preview {

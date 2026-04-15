@@ -9,6 +9,7 @@ import AppKit
 import SwiftUI
 import SwiftData
 import Carbon.HIToolbox
+import WebKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
@@ -17,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var modelContainer: ModelContainer?
     private var windowMover: WindowMover?
     private var settingsWindow: NSWindow?
+    private var helpWindow: NSWindow?
     private var hotkeyObserver: Any?
     
     // 快捷键标识符
@@ -38,7 +40,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 监听屏幕变化
         setupScreenChangeObserver()
         
-        // 初始化窗口移动器
+        // 初始化窗口管理器
         setupWindowMover()
         
         // 设置全局快捷键
@@ -128,18 +130,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: .openSettingsWindow,
             object: nil
         )
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(openHelpWindow),
+            name: .openHelpWindow,
+            object: nil
+        )
     }
     
     private func setupWindowMover() {
         windowMover = WindowMover()
         if let container = modelContainer {
             windowMover?.configure(modelContext: container.mainContext)
-            
-            let descriptor = FetchDescriptor<AppSettings>()
-            if let settings = try? container.mainContext.fetch(descriptor).first,
-               settings.enableAutoMove {
-                windowMover?.startMonitoring()
-            }
+            windowMover?.startMonitoring() // 启动固定屏幕监控
         }
     }
     
@@ -328,12 +332,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.delegate = self
         
         // 计算窗口大小并居中显示
-        window.setContentSize(NSSize(width: 400, height: 480))
+        window.setContentSize(NSSize(width: 400, height: 400))
         window.center()
         
         settingsWindow = window
         
         settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    // MARK: - 帮助窗口
+    @objc private func openHelpWindow() {
+        // 关闭 popover
+        closePopover()
+        
+        // 如果窗口已存在，关闭并重新创建
+        if helpWindow != nil {
+            helpWindow?.close()
+            helpWindow = nil
+        }
+        
+        // 获取帮助 HTML 文件路径
+        guard let htmlPath = Bundle.main.path(forResource: "HelpView", ofType: "html") else {
+            print("HelpView.html not found")
+            // 使用内置 URL
+            if let url = URL(string: "https://github.com/thking/SwallowScreen") {
+                NSWorkspace.shared.open(url)
+            }
+            return
+        }
+        
+        let htmlURL = URL(fileURLWithPath: htmlPath)
+        
+        // 创建 WKWebView
+        let webView = WKWebView()
+        webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+        
+        let viewController = NSViewController()
+        viewController.view = webView
+        
+        let window = NSWindow(contentViewController: viewController)
+        window.title = "SwallowScreen 使用帮助"
+        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+        window.level = .floating
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        
+        // 设置窗口大小
+        window.setContentSize(NSSize(width: 900, height: 700))
+        window.minSize = NSSize(width: 600, height: 400)
+        window.center()
+        
+        helpWindow = window
+        
+        helpWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     
@@ -372,8 +424,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
-        windowMover?.stopMonitoring()
-        
         // 注销快捷键观察者
         if let observer = hotkeyObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -387,8 +437,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - NSWindowDelegate
 extension AppDelegate: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
-        if let window = notification.object as? NSWindow, window == settingsWindow {
-            settingsWindow = nil
+        if let window = notification.object as? NSWindow {
+            if window == settingsWindow {
+                settingsWindow = nil
+            } else if window == helpWindow {
+                helpWindow = nil
+            }
         }
     }
 }

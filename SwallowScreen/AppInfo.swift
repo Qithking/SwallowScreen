@@ -28,19 +28,23 @@ final class AppInfo {
     // 是否启用该应用的屏幕规则
     var isEnabled: Bool
     
+    // 是否固定屏幕 - 开启后应用只能在该屏幕移动，不允许移到其他屏幕
+    var pinToScreen: Bool
+    
     // 创建时间
     var createdAt: Date
     
     // 更新时间
     var updatedAt: Date
     
-    init(bundleIdentifier: String, appName: String, iconData: Data? = nil, targetScreenID: UInt32? = nil, targetScreenName: String? = nil, isEnabled: Bool = true) {
+    init(bundleIdentifier: String, appName: String, iconData: Data? = nil, targetScreenID: UInt32? = nil, targetScreenName: String? = nil, isEnabled: Bool = true, pinToScreen: Bool = false) {
         self.bundleIdentifier = bundleIdentifier
         self.appName = appName
         self.iconData = iconData
         self.targetScreenID = targetScreenID
         self.targetScreenName = targetScreenName
         self.isEnabled = isEnabled
+        self.pinToScreen = pinToScreen
         self.createdAt = Date()
         self.updatedAt = Date()
     }
@@ -48,6 +52,11 @@ final class AppInfo {
     func updateScreen(screenID: UInt32?, screenName: String?) {
         self.targetScreenID = screenID
         self.targetScreenName = screenName
+        self.updatedAt = Date()
+    }
+    
+    func updatePinToScreen(_ pinned: Bool) {
+        self.pinToScreen = pinned
         self.updatedAt = Date()
     }
 }
