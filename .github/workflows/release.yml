@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  SWIFT_VERSION: "5.9"
+
 jobs:
   build-intel:
     runs-on: macos-13
@@ -24,15 +27,16 @@ jobs:
 
       - name: Build Intel
         run: |
-          xcodebuild -project SwallowScreen.xcodeproj \
-            -scheme SwallowScreen \
-            -configuration Release \
-            -derivedDataPath ./DerivedData \
-            -arch x86_64 \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+          swift build -c release --arch x86_64
+
+      - name: Create App Bundle Intel
+        run: |
+          mkdir -p SwallowScreen.app/Contents/MacOS
+          mkdir -p SwallowScreen.app/Contents/Resources
+          cp .build/apple/products/release/SwallowScreen SwallowScreen.app/Contents/MacOS/
+          cp SwallowScreen/Info.plist SwallowScreen.app/Contents/
+          cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
+          cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
 
       - name: Create Intel DMG
         run: |
@@ -46,7 +50,7 @@ jobs:
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
             "SwallowScreen-Intel-${{ github.ref_name }}.dmg" \
-            "./DerivedData/Build/Products/Release/SwallowScreen.app"
+            "SwallowScreen.app"
 
       - name: Upload Intel DMG
         uses: softprops/action-gh-release@v2
@@ -82,22 +86,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/Library/Developer/Xcode/DerivedData
-          key: ${{ runner.os }}-deriveddata-${{ hashFiles('SwallowScreen/**/*.swift') }}
+            ~/Library/Caches/org.swift.swiftpm
+            .build
+          key: ${{ runner.os }}-swift-${{ hashFiles('Package.swift', 'SwallowScreen/**/*.swift') }}
           restore-keys: |
-            ${{ runner.os }}-deriveddata-
+            ${{ runner.os }}-swift-
 
       - name: Build Apple Silicon
         run: |
-          xcodebuild -project SwallowScreen.xcodeproj \
-            -scheme SwallowScreen \
-            -configuration Release \
-            -derivedDataPath ./DerivedData \
-            -arch arm64 \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+          swift build -c release --arch arm64
+
+      - name: Create App Bundle Apple Silicon
+        run: |
+          mkdir -p SwallowScreen.app/Contents/MacOS
+          mkdir -p SwallowScreen.app/Contents/Resources
+          cp .build/apple/products/release/SwallowScreen SwallowScreen.app/Contents/MacOS/
+          cp SwallowScreen/Info.plist SwallowScreen.app/Contents/
+          cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
+          cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
 
       - name: Create Apple Silicon DMG
         run: |
@@ -111,7 +117,7 @@ jobs:
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
             "SwallowScreen-AppleSilicon-${{ github.ref_name }}.dmg" \
-            "./DerivedData/Build/Products/Release/SwallowScreen.app"
+            "SwallowScreen.app"
 
       - name: Upload Apple Silicon DMG
         uses: softprops/action-gh-release@v2
