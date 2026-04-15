@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Build
+        run: |
+          xcodebuild -project SwallowScreen.xcodeproj \
+            -scheme SwallowScreen \
+            -configuration Release \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Find App
+        id: find_app
+        run: |
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "SwallowScreen.app" -type d | head -1)
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+          echo "Found app at: $APP_PATH"
+
+      - name: Create DMG
+        run: |
+          brew install create-dmg
+          create-dmg \
+            --volname "SwallowScreen" \
+            --window-pos 200 120 \
+            --window-size 500 350 \
+            --icon-size 100 \
+            --icon "SwallowScreen.app" 150 175 \
+            --app-drop-link 350 175 \
+            --hide-extension "SwallowScreen.app" \
+            --codesign-method none \
+            "SwallowScreen-${{ github.ref_name }}.dmg" \
+            "${{ steps.find_app.outputs.app_path }}"
+
+      - name: Get Version
+        id: version
+        run: |
+          VERSION="${TAG_NAME#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body: |
+            ## SwallowScreen ${{ steps.version.outputs.version }}
+
+            多屏幕窗口管理工具
+
+            ### 功能
+            - 固定屏幕：指定应用只能在特定屏幕移动
+            - 多屏幕支持：为每个应用指定首选显示屏幕
+            - 全局快捷键：快速设置前台应用的屏幕
+            - 菜单栏应用：不占用 Dock 空间
+          files: SwallowScreen-${{ steps.version.outputs.version }}.dmg
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
