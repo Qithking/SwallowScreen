@@ -16,13 +16,15 @@ struct SystemApp: Identifiable, Hashable {
     let name: String
     let path: String
     let icon: NSImage?
+    let isMenuBarApp: Bool  // 是否是菜单栏应用
     
-    init(bundleIdentifier: String, name: String, path: String, icon: NSImage?) {
+    init(bundleIdentifier: String, name: String, path: String, icon: NSImage?, isMenuBarApp: Bool = false) {
         self.id = bundleIdentifier
         self.bundleIdentifier = bundleIdentifier
         self.name = name
         self.path = path
         self.icon = icon
+        self.isMenuBarApp = isMenuBarApp
     }
 }
 
@@ -89,6 +91,9 @@ class AppManager: ObservableObject {
                         continue
                     }
                     
+                    // 检测是否是菜单栏应用 (LSUIElement = true)
+                    let isMenuBarApp = (bundle.infoDictionary?["LSUIElement"] as? Bool) == true
+                    
                     let icon = NSWorkspace.shared.icon(forFile: item.path)
                     icon.size = NSSize(width: 32, height: 32)
                     
@@ -96,7 +101,8 @@ class AppManager: ObservableObject {
                         bundleIdentifier: bundleIdentifier,
                         name: name,
                         path: item.path,
-                        icon: icon
+                        icon: icon,
+                        isMenuBarApp: isMenuBarApp
                     )
                     apps.append(app)
                 }

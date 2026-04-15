@@ -153,6 +153,7 @@ struct AppPopoverView: View {
                         screens: screenManager.screens,
                         selectedScreen: getSelectedScreen(for: app),
                         isPinToScreen: getIsPinToScreen(for: app),
+                        isMenuBarApp: app.isMenuBarApp,
                         onScreenSelected: { screenInfo in
                             configureApp(app: app, screen: screenInfo)
                         },
@@ -299,6 +300,7 @@ struct AppRowView: View {
     let screens: [ScreenInfo]
     let selectedScreen: ScreenInfo?
     let isPinToScreen: Bool
+    let isMenuBarApp: Bool  // 是否是菜单栏应用
     let onScreenSelected: (ScreenInfo?) -> Void
     let onPinToScreenChanged: (Bool) -> Void
     
@@ -306,16 +308,19 @@ struct AppRowView: View {
     
     var body: some View {
         HStack(spacing: 8) {
-            // 固定屏幕图标
+            // 固定屏幕图标 - 菜单栏应用禁用
             Button(action: {
-                onPinToScreenChanged(!isPinToScreen)
+                if !isMenuBarApp {
+                    onPinToScreenChanged(!isPinToScreen)
+                }
             }) {
                 Image(systemName: isPinToScreen ? "pin.circle.fill" : "pin.circle")
                     .font(.system(size: 16))
-                    .foregroundColor(isPinToScreen ? .green : .secondary)
+                    .foregroundColor(isMenuBarApp ? .gray.opacity(0.3) : (isPinToScreen ? .green : .secondary))
             }
             .buttonStyle(.plain)
-            .help("固定屏幕：开启后该应用只能在此屏幕显示")
+            .disabled(isMenuBarApp)
+            .help(isMenuBarApp ? "菜单栏应用不支持固定屏幕" : "固定屏幕：开启后该应用只能在此屏幕显示")
             
             // 应用图标
             if let icon = app.icon {
@@ -335,47 +340,53 @@ struct AppRowView: View {
             
             Spacer(minLength: 8)
             
-            // 屏幕选择下拉框 - 右对齐
-            Menu {
-                Button("不指定屏幕") {
-                    onScreenSelected(nil)
-                }
-                
-                Divider()
-                
-                ForEach(screens) { screen in
-                    Button {
-                        onScreenSelected(screen)
-                    } label: {
-                        HStack {
-                            Text(screen.displayName)
-                            if screen.isMain {
-                                Text("(主屏幕)")
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            if selectedScreen?.id == screen.id {
-                                Image(systemName: "checkmark")
+            // 屏幕选择下拉框 - 菜单栏应用禁用
+            if isMenuBarApp {
+                Text("菜单栏应用")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Menu {
+                    Button("不指定屏幕") {
+                        onScreenSelected(nil)
+                    }
+                    
+                    Divider()
+                    
+                    ForEach(screens) { screen in
+                        Button {
+                            onScreenSelected(screen)
+                        } label: {
+                            HStack {
+                                Text(screen.displayName)
+                                if screen.isMain {
+                                    Text("(主屏幕)")
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                if selectedScreen?.id == screen.id {
+                                    Image(systemName: "checkmark")
+                                }
                             }
                         }
                     }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(selectedScreen?.displayName ?? "不指定")
+                            .font(.caption)
+                            .foregroundColor(selectedScreen != nil ? .primary : .secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+                    )
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(selectedScreen?.displayName ?? "不指定")
-                        .font(.caption)
-                        .foregroundColor(selectedScreen != nil ? .primary : .secondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
-                )
+                .menuStyle(.borderlessButton)
+                .fixedSize()
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
