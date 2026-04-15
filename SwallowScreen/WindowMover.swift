@@ -17,8 +17,10 @@ class WindowMover: ObservableObject {
     
     private var timer: Timer?
     private var modelContext: ModelContext?
-    private var checkInterval: TimeInterval = 0.5  // 固定屏幕检查间隔（缩短到0.5秒）
-    private var lastMovedWindows: Set<String> = [] // 记录上次移动的窗口，避免频繁移动
+    private var checkInterval: TimeInterval = 0.2  // 固定屏幕检查间隔
+    private var lastMovedWindows: Set<String> = [] // 冷却中的窗口
+    private var previousWindowPositions: [String: CGPoint] = [:] // 上次窗口位置
+    private var movingWindows: Set<String> = [] // 正在移动的窗口
     
     init() {
         checkAccessibilityPermission()
@@ -28,26 +30,30 @@ class WindowMover: ObservableObject {
         self.modelContext = modelContext
     }
     
-    func startMonitoring() {
-        guard !isMonitoring else { return }
+    func startMonitoring() -> Bool {
+        guard !isMonitoring else { return true }
         
         // 检查权限
-        if !checkAccessibilityPermission() {
+        if !AXIsProcessTrusted() {
             print("⚠️ 没有辅助功能权限，无法控制窗口")
             requestAccessibilityPermission()
-            return
+            return false
         }
         
         isMonitoring = true
         
-        // 使用 Timer 定期检查固定屏幕的应用
-        timer = Timer.scheduledTimer(withTimeInterval: checkInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.checkAndEnforcePinnedWindows()
+        // 在主线程创建 Timer
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.checkAndEnforcePinnedWindows()
+                }
             }
+            RunLoop.current.add(self.timer!, forMode: .common)
         }
-        RunLoop.current.add(timer!, forMode: .common)
         print("✅ WindowMover 监控已启动")
+        return true
     }
     
     func stopMonitoring() {
@@ -55,6 +61,8 @@ class WindowMover: ObservableObject {
         timer = nil
         isMonitoring = false
         lastMovedWindows.removeAll()
+        previousWindowPositions.removeAll()
+        movingWindows.removeAll()
     }
     
     /// 检查并强制执行固定屏幕规则
@@ -63,38 +71,37 @@ class WindowMover: ObservableObject {
         
         // 检查权限
         if !AXIsProcessTrusted() {
+            if hasAccessibilityPermission {
+                print("⚠️ 辅助功能权限被撤销")
+                hasAccessibilityPermission = false
+            }
             return
         }
-        
-        // 获取所有启用了固定屏幕的应用
-        let descriptor = FetchDescriptor<AppInfo>()
+        hasAccessibilityPermission = true
         
         do {
+            let descriptor = FetchDescriptor<AppInfo>()
             let allApps = try modelContext.fetch(descriptor)
+            
             let pinnedApps = allApps.filter { $0.pinToScreen && $0.targetScreenID != nil }
             
             for appInfo in pinnedApps {
-                guard let targetScreenID = appInfo.targetScreenID else { continue }
-                
-                // 查找目标屏幕
-                guard let targetScreen = getScreenFrame(for: targetScreenID) else { 
-                    print("找不到目标屏幕: \(targetScreenID)")
-                    continue 
+                guard let targetScreenID = appInfo.targetScreenID,
+                      let targetScreenFrame = getScreenFrame(for: targetScreenID),
+                      let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first else {
+                    continue
                 }
                 
-                // 查找该应用的所有窗口
-                if let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first {
-                    let pid = app.processIdentifier
-                    enforceAppOnScreen(pid: pid, targetFrame: targetScreen, appBundleID: appInfo.bundleIdentifier)
-                }
+                let pid = app.processIdentifier
+                checkWindowPosition(pid: pid, targetFrame: targetScreenFrame, appBundleID: appInfo.bundleIdentifier, screenID: targetScreenID)
             }
         } catch {
-            print("Error fetching pinned apps: \(error)")
+            print("❌ Error: \(error)")
         }
     }
     
-    /// 强制应用窗口保持在指定屏幕
-    private func enforceAppOnScreen(pid: pid_t, targetFrame: CGRect, appBundleID: String) {
+    /// 检查窗口位置并处理
+    private func checkWindowPosition(pid: pid_t, targetFrame: CGRect, appBundleID: String, screenID: UInt32) {
         let appElement = AXUIElementCreateApplication(pid)
         
         var windowsValue: CFTypeRef?
@@ -105,69 +112,83 @@ class WindowMover: ObservableObject {
         }
         
         for window in windows {
-            // 检查窗口当前是否在允许的屏幕上
-            let isOnScreen = isWindowOnAllowedScreen(window, allowedScreenFrame: targetFrame)
+            let windowID = "\(pid)-\(window.hashValue)"
             
-            if !isOnScreen {
-                let windowID = "\(pid)-\(window.hashValue)"
+            // 获取窗口位置
+            var positionValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+                  let posVal = positionValue else {
+                continue
+            }
+            
+            var axPosition = CGPoint.zero
+            AXValueGetValue(posVal as! AXValue, .cgPoint, &axPosition)
+            
+            let previousPosition = previousWindowPositions[windowID]
+            
+            // 获取鼠标释放时的位置（当前鼠标位置）
+            let mouseLocation = NSEvent.mouseLocation
+            
+            // 判断鼠标在哪个屏幕上
+            let mouseScreen = getScreenContainingPoint(mouseLocation)
+            
+            // 如果窗口位置没变，跳过
+            if let prev = previousPosition,
+               prev.x == axPosition.x && prev.y == axPosition.y {
+                continue
+            }
+            
+            // 窗口位置发生变化
+            previousWindowPositions[windowID] = axPosition
+            
+            // 如果已经在移动中，跳过
+            if movingWindows.contains(windowID) {
+                continue
+            }
+            
+            // 检查鼠标是否在目标屏幕上
+            if let currentScreen = mouseScreen {
+                let currentScreenID = getScreenID(currentScreen)
                 
-                // 避免重复移动同一窗口
-                if !lastMovedWindows.contains(windowID) {
-                    lastMovedWindows.insert(windowID)
-                    print("🔒 窗口超出边界，正在移回: \(appBundleID)")
-                    moveWindowBackToAllowedScreen(window, targetFrame: targetFrame)
-                    
-                    // 3秒后移除记录，允许再次移动（如果用户故意移动）
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                        self?.lastMovedWindows.remove(windowID)
-                    }
+                // 鼠标在正确的屏幕上，不干预
+                if currentScreenID == screenID {
+                    continue
                 }
-            } else {
-                // 窗口在正确屏幕上，移除记录
-                let windowID = "\(pid)-\(window.hashValue)"
-                lastMovedWindows.remove(windowID)
+            }
+            
+            // 鼠标不在目标屏幕，移回目标屏幕
+            movingWindows.insert(windowID)
+            moveWindowToScreenCenter(window, targetFrame: targetFrame, windowID: windowID, appBundleID: appBundleID)
+        }
+    }
+    
+    /// 获取包含指定点的屏幕
+    private func getScreenContainingPoint(_ point: CGPoint) -> CGRect? {
+        for screen in NSScreen.screens {
+            let screenFrame = screen.frame
+            let relativeX = point.x - screenFrame.origin.x
+            let relativeY = point.y - screenFrame.origin.y
+            
+            if relativeX >= 0 && relativeX < screenFrame.width 
+               && relativeY >= 0 && relativeY < screenFrame.height {
+                return screenFrame
             }
         }
+        return nil
     }
     
-    /// 检查窗口是否在允许的屏幕内（检查窗口左上角位置）
-    private func isWindowOnAllowedScreen(_ window: AXUIElement, allowedScreenFrame: CGRect) -> Bool {
-        var positionValue: CFTypeRef?
-        let posResult = AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue)
-        
-        guard posResult == .success, let posVal = positionValue else {
-            return true // 无法获取位置，假设正确
+    /// 获取屏幕ID
+    private func getScreenID(_ screenFrame: CGRect) -> UInt32? {
+        for screen in NSScreen.screens {
+            if screen.frame == screenFrame {
+                return screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+            }
         }
-        
-        var position = CGPoint.zero
-        AXValueGetValue(posVal as! AXValue, .cgPoint, &position)
-        
-        // 检查窗口左上角是否在屏幕内（更严格的检查）
-        let isInside = allowedScreenFrame.contains(position)
-        
-        // 也检查窗口大部分是否在屏幕内
-        var sizeValue: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
-        
-        if let szVal = sizeValue {
-            var size = CGSize.zero
-            AXValueGetValue(szVal as! AXValue, .cgSize, &size)
-            
-            // 窗口右上角
-            let topRight = CGPoint(x: position.x + size.width, y: position.y)
-            // 窗口左下角
-            let bottomLeft = CGPoint(x: position.x, y: position.y + size.height)
-            
-            // 如果窗口左上角和右下角都在屏幕内，认为窗口在正确屏幕
-            return allowedScreenFrame.contains(topRight) || allowedScreenFrame.contains(bottomLeft) || isInside
-        }
-        
-        return isInside
+        return nil
     }
     
-    /// 将窗口移回允许的屏幕
-    private func moveWindowBackToAllowedScreen(_ window: AXUIElement, targetFrame: CGRect) {
-        // 获取窗口尺寸
+    /// 将窗口移到屏幕中心
+    private func moveWindowToScreenCenter(_ window: AXUIElement, targetFrame: CGRect, windowID: String, appBundleID: String) {
         var sizeValue: CFTypeRef?
         AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
         
@@ -176,43 +197,25 @@ class WindowMover: ObservableObject {
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
         }
         
-        // 计算新位置（保持在目标屏幕内，靠近最近的边界）
-        // 获取当前窗口位置
-        var positionValue: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue)
+        // 计算屏幕中心位置
+        let centerX = targetFrame.midX - size.width / 2
+        let centerY = targetFrame.midY - size.height / 2
         
-        var currentPosition = CGPoint.zero
-        if let posVal = positionValue {
-            AXValueGetValue(posVal as! AXValue, .cgPoint, &currentPosition)
-        }
-        
-        // 计算新位置（保持在目标屏幕内）
-        var newPosition = currentPosition
-        
-        // 计算屏幕边界
-        let screenMinX = targetFrame.minX
-        let screenMaxX = targetFrame.maxX - size.width
-        let screenMinY = targetFrame.minY
-        let screenMaxY = targetFrame.maxY - size.height
-        
-        // 限制 X 坐标
-        if newPosition.x < screenMinX {
-            newPosition.x = screenMinX
-        } else if newPosition.x > screenMaxX {
-            newPosition.x = max(screenMinX, screenMaxX)
-        }
-        
-        // 限制 Y 坐标
-        if newPosition.y < screenMinY {
-            newPosition.y = screenMinY
-        } else if newPosition.y > screenMaxY {
-            newPosition.y = max(screenMinY, screenMaxY)
-        }
-        
-        // 设置窗口位置
-        var position = newPosition
+        var position = CGPoint(x: centerX, y: centerY)
         if let positionValue = AXValueCreate(.cgPoint, &position) {
-            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+            let result = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+            if result == .success {
+                lastMovedWindows.insert(windowID)
+                print("🔒 窗口已移回指定屏幕中心: \(appBundleID)")
+                
+                // 从移动中列表移除
+                movingWindows.remove(windowID)
+                
+                // 2秒后允许再次移动
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.lastMovedWindows.remove(windowID)
+                }
+            }
         }
     }
     

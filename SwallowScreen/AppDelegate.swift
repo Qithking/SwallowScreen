@@ -20,6 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var helpWindow: NSWindow?
     private var hotkeyObserver: Any?
+    private var permissionCheckTimer: Timer? // 权限检查定时器
     
     // 快捷键标识符
     private var setScreenHotKeyID = EventHotKeyID()
@@ -40,14 +41,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // 监听屏幕变化
         setupScreenChangeObserver()
         
-        // 初始化窗口管理器
-        setupWindowMover()
-        
         // 设置全局快捷键
         setupGlobalHotKeys()
         
         // 监听设置窗口通知
         setupSettingsWindowObserver()
+        
+        // 初始化窗口管理器（最后初始化，确保 modelContainer 已准备好）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.setupWindowMover()
+        }
     }
     
     private func setupModelContainer() {
@@ -140,10 +143,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func setupWindowMover() {
+        guard let container = modelContainer else {
+            print("❌ WindowMover: modelContainer 为空")
+            return
+        }
+        
         windowMover = WindowMover()
-        if let container = modelContainer {
-            windowMover?.configure(modelContext: container.mainContext)
-            windowMover?.startMonitoring() // 启动固定屏幕监控
+        windowMover?.configure(modelContext: container.mainContext)
+        
+        if windowMover?.startMonitoring() == true {
+            print("✅ WindowMover 监控已启动")
+            // 监控启动成功后停止权限检查定时器
+            permissionCheckTimer?.invalidate()
+            permissionCheckTimer = nil
+        } else {
+            print("⚠️ WindowMover 监控未启动，开始权限检查定时器")
+            // 启动权限检查定时器
+            startPermissionCheckTimer()
+        }
+    }
+    
+    /// 启动权限检查定时器
+    private func startPermissionCheckTimer() {
+        permissionCheckTimer?.invalidate()
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                // 检查辅助功能权限
+                if AXIsProcessTrusted() {
+                    print("✅ 辅助功能权限已授予，重新初始化 WindowMover")
+                    self?.windowMover?.stopMonitoring()
+                    self?.setupWindowMover()
+                }
+            }
         }
     }
     
@@ -424,6 +456,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        // 停止权限检查定时器
+        permissionCheckTimer?.invalidate()
+        permissionCheckTimer = nil
+        
         // 注销快捷键观察者
         if let observer = hotkeyObserver {
             NotificationCenter.default.removeObserver(observer)
