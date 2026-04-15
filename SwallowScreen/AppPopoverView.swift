@@ -218,7 +218,7 @@ struct AppRowView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
             
-            Spacer()
+            Spacer(minLength: 8)
             
             // 屏幕选择下拉框 - 右对齐
             Menu {
@@ -238,6 +238,7 @@ struct AppRowView: View {
                                 Text("(主屏幕)")
                                     .foregroundColor(.secondary)
                             }
+                            Spacer()
                             if selectedScreen?.id == screen.id {
                                 Image(systemName: "checkmark")
                             }
@@ -250,6 +251,9 @@ struct AppRowView: View {
                         .font(.caption)
                         .foregroundColor(selectedScreen != nil ? .primary : .secondary)
                         .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8))
+                        .foregroundColor(.secondary)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
@@ -258,7 +262,7 @@ struct AppRowView: View {
                         .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
                 )
             }
-            .frame(width: 120)
+            .fixedSize()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

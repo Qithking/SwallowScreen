@@ -9,6 +9,7 @@ import SwiftUI
 import SwiftData
 import ServiceManagement
 import Carbon.HIToolbox
+import AppKit
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
@@ -26,8 +27,9 @@ struct SettingsView: View {
     @State private var clearScreenKeyCode: UInt32 = 0x19
     
     @State private var recordingHotkey: HotkeyType? = nil
+    @State private var localMonitor: Any?
     
-    enum ModifierKey: String, CaseIterable {
+    enum ModifierKey: String, CaseIterable, Hashable {
         case command = "⌘"
         case shift = "⇧"
         case option = "⌥"
@@ -83,8 +85,7 @@ struct SettingsView: View {
                                 modifiers: $setScreenModifiers,
                                 keyCode: $setScreenKeyCode,
                                 isRecording: recordingHotkey == .setScreen,
-                                onStartRecording: { recordingHotkey = .setScreen },
-                                onStopRecording: { recordingHotkey = nil }
+                                onStartRecording: { recordingHotkey = .setScreen }
                             )
                             .onChange(of: setScreenModifiers) { _, _ in saveHotkey(.setScreen) }
                             .onChange(of: setScreenKeyCode) { _, _ in saveHotkey(.setScreen) }
@@ -95,8 +96,7 @@ struct SettingsView: View {
                                 modifiers: $clearScreenModifiers,
                                 keyCode: $clearScreenKeyCode,
                                 isRecording: recordingHotkey == .clearScreen,
-                                onStartRecording: { recordingHotkey = .clearScreen },
-                                onStopRecording: { recordingHotkey = nil }
+                                onStartRecording: { recordingHotkey = .clearScreen }
                             )
                             .onChange(of: clearScreenModifiers) { _, _ in saveHotkey(.clearScreen) }
                             .onChange(of: clearScreenKeyCode) { _, _ in saveHotkey(.clearScreen) }
@@ -142,15 +142,53 @@ struct SettingsView: View {
         .onAppear {
             loadSettings()
         }
-        .onReceive(NotificationCenter.default.publisher(for: .recordingHotkey)) { notification in
-            guard recordingHotkey != nil else { return }
-            
-            if let keyCode = notification.userInfo?["keyCode"] as? UInt32,
-               let flags = notification.userInfo?["flags"] as? UInt32 {
-                if keyCode != 0 {
-                    setRecordedHotkey(keyCode: keyCode, flags: flags)
-                }
+        .onChange(of: recordingHotkey) { _, newValue in
+            if newValue != nil {
+                startRecording()
+            } else {
+                stopRecording()
             }
+        }
+    }
+    
+    private func startRecording() {
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard self.recordingHotkey != nil else { return event }
+            
+            let keyCode = UInt32(event.keyCode)
+            var flags: UInt32 = 0
+            
+            if event.modifierFlags.contains(.command) { flags |= UInt32(cmdKey) }
+            if event.modifierFlags.contains(.shift) { flags |= UInt32(shiftKey) }
+            if event.modifierFlags.contains(.option) { flags |= UInt32(optionKey) }
+            if event.modifierFlags.contains(.control) { flags |= UInt32(controlKey) }
+            
+            // ESC 取消录制
+            if keyCode == 0x35 {
+                DispatchQueue.main.async {
+                    self.recordingHotkey = nil
+                }
+                return nil
+            }
+            
+            // 必须有修饰键
+            if flags == 0 {
+                return nil
+            }
+            
+            DispatchQueue.main.async {
+                self.setRecordedHotkey(keyCode: keyCode, flags: flags)
+                self.recordingHotkey = nil
+            }
+            
+            return nil
+        }
+    }
+    
+    private func stopRecording() {
+        if let monitor = localMonitor {
+            NSEvent.removeMonitor(monitor)
+            localMonitor = nil
         }
     }
     
@@ -251,28 +289,34 @@ struct HotkeyRecorderView: View {
     @Binding var keyCode: UInt32
     let isRecording: Bool
     let onStartRecording: () -> Void
-    let onStopRecording: () -> Void
     
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                // 快捷键显示
-                HStack(spacing: 4) {
-                    ForEach(Array(modifiers.sorted(by: { $0.rawValue < $1.rawValue })), id: \.self) { mod in
-                        Text(mod.rawValue)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.secondary.opacity(0.2))
-                            .cornerRadius(4)
+                // 快捷键显示 - 可点击
+                Button(action: {
+                    onStartRecording()
+                }) {
+                    HStack(spacing: 4) {
+                        if isRecording {
+                            Text("按下快捷键...")
+                                .foregroundColor(.red)
+                        } else {
+                            ForEach(Array(modifiers.sorted(by: { $0.rawValue < $1.rawValue })), id: \.self) { mod in
+                                Text(mod.rawValue)
+                            }
+                            Text(keyCodeToString(keyCode))
+                        }
                     }
-                    
-                    Text(keyCodeToString(keyCode))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.secondary.opacity(0.2))
-                        .cornerRadius(4)
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(isRecording ? Color.red.opacity(0.15) : Color.secondary.opacity(0.2))
+                    )
                 }
-                .font(.system(size: 12, weight: .medium))
+                .buttonStyle(.plain)
                 
                 Text(title)
                     .font(.caption)
@@ -280,19 +324,6 @@ struct HotkeyRecorderView: View {
             }
             
             Spacer()
-            
-            Button(action: {
-                if isRecording {
-                    onStopRecording()
-                } else {
-                    onStartRecording()
-                }
-            }) {
-                Text(isRecording ? "取消" : "编辑")
-                    .font(.caption)
-                    .foregroundColor(isRecording ? .red : .accentColor)
-            }
-            .buttonStyle(.plain)
         }
     }
     
