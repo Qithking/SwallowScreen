@@ -270,6 +270,11 @@ struct AppPopoverView: View {
             )
             modelContext.insert(newInfo)
         }
+        
+        // 启用固定屏幕时，立即触发检查
+        if pinned {
+            NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
+        }
     }
     
     private func updateSetting(_ update: (AppSettings) -> Void) {
@@ -385,6 +390,7 @@ struct AppRowView: View {
 extension Notification.Name {
     static let openSettingsWindow = Notification.Name("openSettingsWindow")
     static let openHelpWindow = Notification.Name("openHelpWindow")
+    static let pinToScreenChanged = Notification.Name("pinToScreenChanged")
 }
 
 #Preview {

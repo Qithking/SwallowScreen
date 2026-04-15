@@ -285,4 +285,9 @@ class WindowMover: ObservableObject {
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true]
         AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
+    
+    /// 立即触发窗口位置检查
+    func triggerImmediateCheck() {
+        checkAndEnforcePinnedWindows()
+    }
 }

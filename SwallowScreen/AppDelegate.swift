@@ -140,6 +140,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             name: .openHelpWindow,
             object: nil
         )
+        
+        // 监听固定屏幕变化通知
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(pinToScreenChanged),
+            name: .pinToScreenChanged,
+            object: nil
+        )
+    }
+    
+    @objc private func pinToScreenChanged() {
+        // 立即触发窗口位置检查
+        Task { @MainActor in
+            windowMover?.triggerImmediateCheck()
+        }
     }
     
     private func setupWindowMover() {
