@@ -2,7 +2,7 @@
 //  SwallowScreenApp.swift
 //  SwallowScreen
 //
-//  Created by thking on 2026/4/15.
+//  应用入口 - Menu Bar App (LSUIElement)
 //
 
 import SwiftUI
@@ -10,23 +10,12 @@ import SwiftData
 
 @main
 struct SwallowScreenApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
-
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        // 不创建 WindowGroup，因为我们使用 Menu Bar App
+        Settings {
+            Text("SwallowScreen")
         }
-        .modelContainer(sharedModelContainer)
     }
 }
