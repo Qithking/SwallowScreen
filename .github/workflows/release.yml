@@ -33,7 +33,7 @@ jobs:
       - name: Copy arm64 binary
         run: |
           mkdir -p build/arm64
-          ARM64_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
+          ARM64_BIN=$(find -L .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
           if [ -z "$ARM64_BIN" ]; then
             echo "Error: arm64 binary not found"
             echo "Release dir contents:"
@@ -52,7 +52,7 @@ jobs:
       - name: Copy x86_64 binary
         run: |
           mkdir -p build/x86_64
-          X86_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
+          X86_BIN=$(find -L .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
           if [ -z "$X86_BIN" ]; then
             echo "Error: x86_64 binary not found"
             exit 1
