@@ -25,36 +25,56 @@ jobs:
         with:
           xcode-version: latest
 
-      - name: Cache Swift packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/Library/Caches/org.swift.swiftpm
-            .build
-          key: ${{ runner.os }}-swift-${{ hashFiles('Package.swift', 'SwallowScreen/**/*.swift') }}
-          restore-keys: |
-            ${{ runner.os }}-swift-
-
-      - name: Build Universal Binary
+      - name: Build arm64
         run: |
-          swift build -c release
+          rm -rf .build
+          swift build -c release --arch arm64
+
+      - name: Copy arm64 binary
+        run: |
+          mkdir -p build/arm64
+          ARM64_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
+          if [ -z "$ARM64_BIN" ]; then
+            echo "Error: arm64 binary not found"
+            echo "Release dir contents:"
+            ls -la .build/release 2>/dev/null || true
+            ls -la .build/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "Found arm64 binary: $ARM64_BIN"
+          cp "$ARM64_BIN" build/arm64/
+
+      - name: Build x86_64
+        run: |
+          rm -rf .build
+          swift build -c release --arch x86_64
+
+      - name: Copy x86_64 binary
+        run: |
+          mkdir -p build/x86_64
+          X86_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
+          if [ -z "$X86_BIN" ]; then
+            echo "Error: x86_64 binary not found"
+            exit 1
+          fi
+          echo "Found x86_64 binary: $X86_BIN"
+          cp "$X86_BIN" build/x86_64/
+
+      - name: Create Universal Binary
+        run: |
+          mkdir -p build/dmg
+          lipo -create build/arm64/SwallowScreen build/x86_64/SwallowScreen -output build/dmg/SwallowScreen
+          lipo -info build/dmg/SwallowScreen
 
       - name: Create App Bundle
         run: |
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
-          # 查找构建产物
-          SWIFT_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
-          if [ -z "$SWIFT_BIN" ]; then
-            echo "Error: SwallowScreen binary not found"
-            ls -la .build/
-            exit 1
-          fi
-          echo "Found binary: $SWIFT_BIN"
-          cp "$SWIFT_BIN" SwallowScreen.app/Contents/MacOS/
+          cp build/dmg/SwallowScreen SwallowScreen.app/Contents/MacOS/
           cp SwallowScreen/Info.plist SwallowScreen.app/Contents/
           cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
           cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
+          chmod +x SwallowScreen.app/Contents/MacOS/SwallowScreen
 
       - name: Create DMG
         run: |
@@ -67,7 +87,7 @@ jobs:
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
-            "SwallowScreen-${{ github.ref_name }}.dmg" \
+            "SwallowScreen-${{ github.ref_name }}-universal.dmg" \
             "SwallowScreen.app"
 
       - name: Upload DMG
