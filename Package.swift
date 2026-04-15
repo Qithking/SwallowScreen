@@ -12,6 +12,9 @@ let package = Package(
             targets: ["SwallowScreen"]
         )
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-collections", from: "1.1.0")
+    ],
     targets: [
         .executableTarget(
             name: "SwallowScreen",

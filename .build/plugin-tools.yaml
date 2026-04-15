@@ -1,0 +1,77 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "PackageStructure": ["<PackageStructure>"]
+  "SwallowScreen-arm64-apple-macosx-release.exe": ["<SwallowScreen-arm64-apple-macosx-release.exe>"]
+  "SwallowScreen-arm64-apple-macosx-release.module": ["<SwallowScreen-arm64-apple-macosx-release.module>"]
+  "main": ["<SwallowScreen-arm64-apple-macosx-release.exe>","<SwallowScreen-arm64-apple-macosx-release.module>"]
+  "test": ["<SwallowScreen-arm64-apple-macosx-release.exe>","<SwallowScreen-arm64-apple-macosx-release.module>"]
+default: "main"
+nodes:
+  "/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppDelegate.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppInfo.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppManager.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppPopoverView.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppSettings.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/ScreenManager.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/SettingsView.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/SwallowScreenApp.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/VisualEffectView.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/WindowMover.swift","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/DerivedSources/resource_bundle_accessor.swift"]
+    outputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/sources"]
+    description: "Write auxiliary file /Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/sources"
+
+  "/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppDelegate.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppInfo.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppPopoverView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppSettings.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/ScreenManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SettingsView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SwallowScreenApp.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/VisualEffectView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/WindowMover.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/resource_bundle_accessor.swift.o"]
+    outputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.product/Objects.LinkFileList"
+
+  "/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen_SwallowScreen.bundle/HelpView.html":
+    tool: copy-tool
+    inputs: ["/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/HelpView.html"]
+    outputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen_SwallowScreen.bundle/HelpView.html"]
+    description: "Copying /Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/HelpView.html"
+
+  "/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<SwallowScreen-arm64-apple-macosx-release.exe>":
+    tool: phony
+    inputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen"]
+    outputs: ["<SwallowScreen-arm64-apple-macosx-release.exe>"]
+
+  "<SwallowScreen-arm64-apple-macosx-release.module>":
+    tool: phony
+    inputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppDelegate.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppInfo.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppPopoverView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppSettings.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/ScreenManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SettingsView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SwallowScreenApp.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/VisualEffectView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/WindowMover.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/resource_bundle_accessor.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/Modules/SwallowScreen.swiftmodule"]
+    outputs: ["<SwallowScreen-arm64-apple-macosx-release.module>"]
+
+  "C.SwallowScreen-arm64-apple-macosx-release.exe":
+    tool: shell
+    inputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppDelegate.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppInfo.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppPopoverView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppSettings.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/ScreenManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SettingsView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SwallowScreenApp.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/VisualEffectView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/WindowMover.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/resource_bundle_accessor.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.product/Objects.LinkFileList"]
+    outputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen"]
+    description: "Linking ./.build/arm64-apple-macosx/release/SwallowScreen"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-L","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release","-o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen","-module-name","SwallowScreen","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-dead_strip","-Xlinker","-alias","-Xlinker","_SwallowScreen_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Library/Developer/CommandLineTools/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx14.0","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g"]
+
+  "C.SwallowScreen-arm64-apple-macosx-release.module":
+    tool: shell
+    inputs: ["/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppDelegate.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppInfo.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppManager.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppPopoverView.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/AppSettings.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/ScreenManager.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/SettingsView.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/SwallowScreenApp.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/VisualEffectView.swift","/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/WindowMover.swift","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/DerivedSources/resource_bundle_accessor.swift","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt","<SwallowScreen-arm64-apple-macosx-release.module-resources>","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/sources"]
+    outputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppDelegate.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppInfo.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppPopoverView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/AppSettings.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/ScreenManager.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SettingsView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/SwallowScreenApp.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/VisualEffectView.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/WindowMover.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/resource_bundle_accessor.swift.o","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/Modules/SwallowScreen.swiftmodule"]
+    description: "Compiling Swift Module 'SwallowScreen' (11 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","SwallowScreen","-emit-dependencies","-emit-module","-emit-module-path","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/Modules/SwallowScreen.swiftmodule","-output-file-map","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/output-file-map.json","-whole-module-optimization","-num-threads","14","-c","@/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen.build/sources","-I","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/Modules","-target","arm64-apple-macosx14.0","-whole-module-optimization","-num-threads","14","-serialize-diagnostics","-O","-j14","-DSWIFT_PACKAGE","-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE","-module-cache-path","/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","SwallowScreen_main","-color-diagnostics","-swift-version","5","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","swallowscreen"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/thking/code/codeBuddy/SwallowScreen/SwallowScreen/","/Users/thking/code/codeBuddy/SwallowScreen/Package.swift","/Users/thking/code/codeBuddy/SwallowScreen/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+
+  "SwallowScreen-arm64-apple-macosx-release.module-resources":
+    tool: phony
+    inputs: ["/Users/thking/code/codeBuddy/SwallowScreen/.build/arm64-apple-macosx/release/SwallowScreen_SwallowScreen.bundle/HelpView.html"]
+    outputs: ["<SwallowScreen-arm64-apple-macosx-release.module-resources>"]
+
