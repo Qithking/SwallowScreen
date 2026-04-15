@@ -178,20 +178,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    /// 停止 WindowMover 监控
+    private func stopWindowMoverMonitoring() {
+        Task { @MainActor in
+            self.windowMover?.stopMonitoring()
+        }
+    }
+    
     /// 启动权限检查定时器
     private func startPermissionCheckTimer() {
         permissionCheckTimer?.invalidate()
         
-        DispatchQueue.main.async { [weak self] in
-            self?.permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                // 检查辅助功能权限
-                if AXIsProcessTrusted() {
-                    print("✅ 辅助功能权限已授予，重新初始化 WindowMover")
-                    self?.windowMover?.stopMonitoring()
-                    self?.setupWindowMover()
-                }
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            // 检查辅助功能权限
+            if AXIsProcessTrusted() {
+                print("✅ 辅助功能权限已授予，重新初始化 WindowMover")
+                self?.stopWindowMoverMonitoring()
+                self?.setupWindowMover()
             }
         }
+        permissionCheckTimer = timer
     }
     
     // MARK: - 全局快捷键设置

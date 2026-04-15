@@ -100,7 +100,7 @@ class ScreenManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.refreshScreens()
                 NotificationCenter.default.post(name: .screenConfigurationChanged, object: nil)
             }

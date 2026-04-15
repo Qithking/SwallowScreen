@@ -23,7 +23,7 @@ class WindowMover: ObservableObject {
     private var movingWindows: Set<String> = [] // 正在移动的窗口
     
     init() {
-        checkAccessibilityPermission()
+        _ = checkAccessibilityPermission()
     }
     
     func configure(modelContext: ModelContext) {
@@ -46,7 +46,7 @@ class WindowMover: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
                     self?.checkAndEnforcePinnedWindows()
                 }
             }
