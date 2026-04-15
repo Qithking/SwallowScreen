@@ -19,34 +19,34 @@ struct AppPopoverView: View {
     
     @State private var searchText = ""
     @State private var selectedAppForConfig: SystemApp?
-    @State private var showSettingsWindow = false
-    @State private var showHelpWindow = false
     
     @State private var settings: AppSettings?
     
     var body: some View {
-        VStack(spacing: 0) {
-            // 第一部分：搜索区域
-            searchArea
+        ZStack {
+            // 毛玻璃背景
+            VisualEffectView(material: .popover, blendingMode: .behindWindow)
+                .ignoresSafeArea()
             
-            Divider()
-            
-            // 第二部分：应用列表区域
-            appListArea
-            
-            Divider()
-            
-            // 第三部分：系统设置工具栏
-            toolbarArea
+            VStack(spacing: 0) {
+                // 第一部分：搜索区域
+                searchArea
+                
+                Divider()
+                
+                // 第二部分：应用列表区域
+                appListArea
+                
+                Divider()
+                
+                // 第三部分：系统设置工具栏
+                toolbarArea
+            }
         }
         .frame(width: 360, height: 400)
         .onAppear {
             setupSettings()
             refreshScreens()
-        }
-        .sheet(isPresented: $showSettingsWindow) {
-            SettingsView()
-                .modelContainer(for: [AppSettings.self])
         }
     }
     
@@ -74,7 +74,6 @@ struct AppPopoverView: View {
             }
         }
         .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
     
     // MARK: - 应用列表区域
@@ -102,7 +101,7 @@ struct AppPopoverView: View {
     private var toolbarArea: some View {
         HStack(spacing: 16) {
             Button(action: {
-                showSettingsWindow = true
+                openSettingsWindow()
             }) {
                 HStack(spacing: 4) {
                     Image(systemName: "gearshape")
@@ -137,7 +136,6 @@ struct AppPopoverView: View {
             .foregroundColor(.red)
         }
         .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
     
     // MARK: - 辅助方法
@@ -146,7 +144,6 @@ struct AppPopoverView: View {
         do {
             let results = try modelContext.fetch(descriptor)
             if results.isEmpty {
-                // 创建默认设置
                 let newSettings = AppSettings()
                 modelContext.insert(newSettings)
             }
@@ -169,7 +166,6 @@ struct AppPopoverView: View {
     }
     
     private func configureApp(app: SystemApp, screen: ScreenInfo?) {
-        // 查找或创建应用配置
         if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
             existingInfo.updateScreen(screenID: screen?.id, screenName: screen?.displayName)
         } else {
@@ -182,6 +178,10 @@ struct AppPopoverView: View {
             )
             modelContext.insert(newInfo)
         }
+    }
+    
+    private func openSettingsWindow() {
+        NotificationCenter.default.post(name: .openSettingsWindow, object: nil)
     }
     
     private func openHelp() {
@@ -220,7 +220,7 @@ struct AppRowView: View {
             
             Spacer()
             
-            // 屏幕选择下拉框
+            // 屏幕选择下拉框 - 右对齐
             Menu {
                 Button("不指定屏幕") {
                     onScreenSelected(nil)
@@ -238,6 +238,9 @@ struct AppRowView: View {
                                 Text("(主屏幕)")
                                     .foregroundColor(.secondary)
                             }
+                            if selectedScreen?.id == screen.id {
+                                Image(systemName: "checkmark")
+                            }
                         }
                     }
                 }
@@ -246,18 +249,16 @@ struct AppRowView: View {
                     Text(selectedScreen?.displayName ?? "不指定")
                         .font(.caption)
                         .foregroundColor(selectedScreen != nil ? .primary : .secondary)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2)
+                        .lineLimit(1)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(Color(nsColor: .controlBackgroundColor))
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
                 )
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 140)
+            .frame(width: 120)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -266,6 +267,11 @@ struct AppRowView: View {
             isHovering = hovering
         }
     }
+}
+
+// MARK: - 通知名称
+extension Notification.Name {
+    static let openSettingsWindow = Notification.Name("openSettingsWindow")
 }
 
 #Preview {
