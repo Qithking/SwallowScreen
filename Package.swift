@@ -9,12 +9,7 @@ let package = Package(
     products: [
         .executable(
             name: "SwallowScreen",
-            targets: ["SwallowScreen"],
-            type: .application,
-            plistOptions: .init(
-                path: "SwallowScreen/Info.plist",
-                generate: false
-            )
+            targets: ["SwallowScreen"]
         )
     ],
     targets: [

@@ -12,64 +12,7 @@ env:
   SWIFT_VERSION: "5.9"
 
 jobs:
-  build-intel:
-    runs-on: macos-13
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest
-
-      - name: Build Intel
-        run: |
-          swift build -c release --arch x86_64
-
-      - name: Create App Bundle Intel
-        run: |
-          mkdir -p SwallowScreen.app/Contents/MacOS
-          mkdir -p SwallowScreen.app/Contents/Resources
-          cp .build/apple/products/release/SwallowScreen SwallowScreen.app/Contents/MacOS/
-          cp SwallowScreen/Info.plist SwallowScreen.app/Contents/
-          cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
-          cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
-
-      - name: Create Intel DMG
-        run: |
-          brew install create-dmg
-          create-dmg \
-            --volname "SwallowScreen" \
-            --window-pos 200 120 \
-            --window-size 500 350 \
-            --icon-size 100 \
-            --icon "SwallowScreen.app" 150 175 \
-            --app-drop-link 350 175 \
-            --hide-extension "SwallowScreen.app" \
-            "SwallowScreen-Intel-${{ github.ref_name }}.dmg" \
-            "SwallowScreen.app"
-
-      - name: Upload Intel DMG
-        uses: softprops/action-gh-release@v2
-        with:
-          body: |
-            ## SwallowScreen (Intel)
-
-            多屏幕窗口管理工具 - Intel 版本
-
-            ### 系统要求
-            - macOS 13.0+
-            - Intel 芯片 Mac
-          files: SwallowScreen-Intel-*.dmg
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-apple-silicon:
+  build-universal:
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -92,11 +35,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-swift-
 
-      - name: Build Apple Silicon
+      - name: Build Universal Binary
         run: |
-          swift build -c release --arch arm64
+          swift build -c release
 
-      - name: Create App Bundle Apple Silicon
+      - name: Create App Bundle
         run: |
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
@@ -105,7 +48,7 @@ jobs:
           cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
           cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
 
-      - name: Create Apple Silicon DMG
+      - name: Create DMG
         run: |
           brew install create-dmg
           create-dmg \
@@ -116,21 +59,30 @@ jobs:
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
-            "SwallowScreen-AppleSilicon-${{ github.ref_name }}.dmg" \
+            "SwallowScreen-${{ github.ref_name }}.dmg" \
             "SwallowScreen.app"
 
-      - name: Upload Apple Silicon DMG
+      - name: Upload DMG
         uses: softprops/action-gh-release@v2
         with:
           body: |
-            ## SwallowScreen (Apple Silicon)
+            ## SwallowScreen
 
-            多屏幕窗口管理工具 - Apple Silicon 版本
+            多屏幕窗口管理工具
 
             ### 系统要求
             - macOS 13.0+
-            - Apple M 系列芯片 Mac
-          files: SwallowScreen-AppleSilicon-*.dmg
+
+            ### 支持架构
+            - Apple Silicon (M1/M2/M3...)
+            - Intel Mac
+
+            ### 功能
+            - 固定屏幕：指定应用只能在特定屏幕移动
+            - 多屏幕支持：为每个应用指定首选显示屏幕
+            - 全局快捷键：快速设置前台应用的屏幕
+            - 菜单栏应用：不占用 Dock 空间
+          files: SwallowScreen-*.dmg
           draft: false
           prerelease: false
         env:
