@@ -43,7 +43,15 @@ jobs:
         run: |
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
-          cp .build/apple/products/release/SwallowScreen SwallowScreen.app/Contents/MacOS/
+          # 查找构建产物
+          SWIFT_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
+          if [ -z "$SWIFT_BIN" ]; then
+            echo "Error: SwallowScreen binary not found"
+            ls -la .build/
+            exit 1
+          fi
+          echo "Found binary: $SWIFT_BIN"
+          cp "$SWIFT_BIN" SwallowScreen.app/Contents/MacOS/
           cp SwallowScreen/Info.plist SwallowScreen.app/Contents/
           cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
           cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
