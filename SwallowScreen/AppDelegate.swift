@@ -11,6 +11,7 @@ import SwiftData
 import Carbon.HIToolbox
 import WebKit
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
@@ -239,26 +240,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         
         var handlerRef: EventHandlerRef?
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         let handlerBlock: EventHandlerUPP = { _, event, userData -> OSStatus in
             guard let userData = userData else { return OSStatus(eventNotHandledErr) }
-            let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
             
             var hotKeyID = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
             
             if hotKeyID.id == 1 {
-                DispatchQueue.main.async {
+                Task { @MainActor in
+                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
                     delegate.setCurrentAppScreen()
                 }
             } else if hotKeyID.id == 2 {
-                DispatchQueue.main.async {
+                Task { @MainActor in
+                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
                     delegate.clearCurrentAppScreen()
                 }
             }
             return noErr
         }
         
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
         InstallEventHandler(GetApplicationEventTarget(), handlerBlock, 1, &eventSpec, selfPtr, &handlerRef)
     }
     
