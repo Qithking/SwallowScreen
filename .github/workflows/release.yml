@@ -163,40 +163,40 @@ jobs:
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           
           if [ -n "$PREV_TAG" ]; then
-            CHANGELOG=$(git log "$PREV_TAG"..HEAD --oneline --format='- %s' 2>/dev/null | head -50 || echo "无更新内容")
+            CHANGELOG=$(git log "$PREV_TAG"..HEAD --oneline --format='  - %s' 2>/dev/null | head -50 || echo "  - 无更新内容")
           else
-            CHANGELOG=$(git log --oneline --format='- %s' | head -20 2>/dev/null || echo "无更新内容")
+            CHANGELOG=$(git log --oneline --format='  - %s' | head -20 2>/dev/null || echo "  - 无更新内容")
           fi
           
-          cat > release_body.txt << 'RELEASE_EOF'
-## SwallowScreen
-
-多屏幕窗口管理工具
-
-### 系统要求
-- macOS 14.0+
-
-### 支持架构
-- Apple Silicon (M1/M2/M3...)
-- Intel Mac
-
-### 更新内容
-CHANGELOG_PLACEHOLDER
-
-### 功能
-- 固定屏幕：指定应用只能在特定屏幕移动
-- 多屏幕支持：为每个应用指定首选显示屏幕
-- 全局快捷键：快速设置前台应用的屏幕
-- 菜单栏应用：不占用 Dock 空间
-
-### 安装说明
-1. 下载并打开 DMG 文件
-2. 将 SwallowScreen.app 拖入 Applications 文件夹
-3. 如果提示"无法打开"，请在系统设置 > 隐私与安全性中允许运行
-4. 首次运行时需要在系统设置中授权辅助功能权限
-RELEASE_EOF
+          {
+            echo "## SwallowScreen"
+            echo ""
+            echo "多屏幕窗口管理工具"
+            echo ""
+            echo "### 系统要求"
+            echo "  - macOS 14.0+"
+            echo ""
+            echo "### 支持架构"
+            echo "  - Apple Silicon (M1/M2/M3...)"
+            echo "  - Intel Mac"
+            echo ""
+            echo "### 更新内容"
+            echo "$CHANGELOG"
+            echo ""
+            echo "### 功能"
+            echo "  - 固定屏幕：指定应用只能在特定屏幕移动"
+            echo "  - 多屏幕支持：为每个应用指定首选显示屏幕"
+            echo "  - 全局快捷键：快速设置前台应用的屏幕"
+            echo "  - 菜单栏应用：不占用 Dock 空间"
+            echo ""
+            echo "### 安装说明"
+            echo "  1. 下载并打开 DMG 文件"
+            echo "  2. 将 SwallowScreen.app 拖入 Applications 文件夹"
+            echo "  3. 如果提示"无法打开"，请在系统设置 > 隐私与安全性中允许运行"
+            echo "  4. 首次运行时需要在系统设置中授权辅助功能权限"
+          } > release_body.txt
           
-          sed -i "s/CHANGELOG_PLACEHOLDER/$CHANGELOG/g" release_body.txt
+          cat release_body.txt
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
