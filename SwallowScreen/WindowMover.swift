@@ -21,7 +21,6 @@ class WindowMover: ObservableObject {
     private var lastMovedWindows: Set<String> = [] // 冷却中的窗口
     private var previousWindowPositions: [String: CGPoint] = [:] // 上次窗口位置
     private var movingWindows: Set<String> = [] // 正在移动的窗口
-    private var launchedApps: Set<String> = [] // 已处理过的启动应用（用于一次性移动）
     
     init() {
         _ = checkAccessibilityPermission()
@@ -47,12 +46,6 @@ class WindowMover: ObservableObject {
     private func handleAppLaunch(bundleIdentifier: String, pid: pid_t) {
         guard let modelContext = modelContext else { return }
         
-        // 如果已经处理过这个应用（同一个 PID），跳过
-        let appKey = "\(bundleIdentifier)-\(pid)"
-        if launchedApps.contains(appKey) {
-            return
-        }
-        
         // 查询应用配置
         let descriptor = FetchDescriptor<AppInfo>(
             predicate: #Predicate { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled == true }
@@ -60,35 +53,47 @@ class WindowMover: ObservableObject {
         
         guard let appInfo = try? modelContext.fetch(descriptor).first else { return }
         
-        // 如果设置了目标屏幕且没有启用固定屏幕，移动到目标屏幕一次
+        // 如果设置了目标屏幕且没有启用固定屏幕
         if let targetScreenID = appInfo.targetScreenID, !appInfo.pinToScreen {
             guard let targetFrame = getScreenFrame(for: targetScreenID) else { return }
+            // 轮询等待窗口创建并立即移动
+            pollForWindows(pid: pid, targetFrame: targetFrame)
+        }
+    }
+    
+    /// 轮询等待窗口创建并立即移动
+    private func pollForWindows(pid: pid_t, targetFrame: CGRect) {
+        let maxAttempts = 30  // 最多 3 秒
+        var attempts = 0
+        
+        func tryMove() {
+            guard attempts < maxAttempts else { return }
+            attempts += 1
             
-            // 立即尝试移动（窗口可能还没创建，所以多次重试）
-            var retryCount = 0
-            let maxRetries = 5
+            guard NSRunningApplication(processIdentifier: pid) != nil else { return }
             
-            func tryMoveWindow() {
-                if let app = NSRunningApplication(processIdentifier: pid) {
-                    let moved = self.moveAppWindowsToScreenQuick(pid: pid, targetFrame: targetFrame)
-                    if !moved && retryCount < maxRetries {
-                        retryCount += 1
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                            tryMoveWindow()
-                        }
-                    } else {
-                        self.launchedApps.insert(appKey)
-                    }
+            let appElement = AXUIElementCreateApplication(pid)
+            var windowsValue: CFTypeRef?
+            
+            let result = AXUIElementCopyAttributeValue(
+                appElement,
+                kAXWindowsAttribute as CFString,
+                &windowsValue
+            )
+            
+            if result == .success, let windows = windowsValue as? [AXUIElement], !windows.isEmpty {
+                for window in windows {
+                    moveWindowToFrameImmediate(window, targetFrame: targetFrame)
                 }
+                return
             }
             
-            tryMoveWindow()
-            
-            // 3秒后移除记录，允许下次启动时重新移动
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                self?.launchedApps.remove(appKey)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                tryMove()
             }
         }
+        
+        tryMove()
     }
     
     func configure(modelContext: ModelContext) {
@@ -342,54 +347,6 @@ class WindowMover: ObservableObject {
         return nil
     }
     
-    /// 将应用窗口移动到指定屏幕（如果不在该屏幕）
-    private func moveAppWindowsToScreenIfNeeded(pid: pid_t, targetFrame: CGRect, appBundleID: String) {
-        let appElement = AXUIElementCreateApplication(pid)
-        
-        var windowsValue: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
-        
-        guard result == .success, let windows = windowsValue as? [AXUIElement] else {
-            return
-        }
-        
-        let windowID = "\(pid)-menuBarApp"
-        
-        // 如果窗口已经在目标屏幕附近，跳过
-        if let prev = previousWindowPositions[windowID] {
-            if abs(prev.x - targetFrame.origin.x) < 50 && abs(prev.y - targetFrame.origin.y) < 50 {
-                return
-            }
-        }
-        
-        for window in windows {
-            // 检查窗口当前位置
-            var positionValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
-                  let posVal = positionValue else {
-                continue
-            }
-            
-            var axPosition = CGPoint.zero
-            AXValueGetValue(posVal as! AXValue, .cgPoint, &axPosition)
-            
-            // 检查窗口是否在目标屏幕内
-            if targetFrame.contains(axPosition) {
-                previousWindowPositions[windowID] = axPosition
-                continue
-            }
-            
-            // 窗口不在目标屏幕，移动它
-            movingWindows.insert(windowID)
-            moveWindowToFrame(window, targetFrame: targetFrame)
-            previousWindowPositions[windowID] = CGPoint(x: targetFrame.midX, y: targetFrame.midY)
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                self?.movingWindows.remove(windowID)
-            }
-        }
-    }
-    
     func moveAppToScreen(bundleIdentifier: String, screenID: UInt32) {
         guard let screenFrame = getScreenFrame(for: screenID) else { return }
         
@@ -410,30 +367,12 @@ class WindowMover: ObservableObject {
         }
         
         for window in windows {
-            moveWindowToFrame(window, targetFrame: targetFrame)
-        }
-    }
-    
-    /// 快速移动窗口到指定屏幕，返回是否成功
-    private func moveAppWindowsToScreenQuick(pid: pid_t, targetFrame: CGRect) -> Bool {
-        let appElement = AXUIElementCreateApplication(pid)
-        
-        var windowsValue: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
-        
-        guard result == .success, let windows = windowsValue as? [AXUIElement], !windows.isEmpty else {
-            return false
-        }
-        
-        for window in windows {
             moveWindowToFrameImmediate(window, targetFrame: targetFrame)
         }
-        return true
     }
     
-    /// 立即移动窗口（无动画）
+    /// 移动窗口到指定位置（居中）
     private func moveWindowToFrameImmediate(_ window: AXUIElement, targetFrame: CGRect) {
-        // 获取窗口尺寸
         var sizeValue: CFTypeRef?
         AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
         
@@ -442,36 +381,11 @@ class WindowMover: ObservableObject {
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
         }
         
-        // 计算新位置（居中显示）
         let newPosition = CGPoint(
             x: targetFrame.origin.x + (targetFrame.width - size.width) / 2,
             y: targetFrame.origin.y + (targetFrame.height - size.height) / 2
         )
         
-        // 设置窗口位置
-        var position = newPosition
-        if let positionValue = AXValueCreate(.cgPoint, &position) {
-            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
-        }
-    }
-    
-    private func moveWindowToFrame(_ window: AXUIElement, targetFrame: CGRect) {
-        // 获取窗口尺寸
-        var sizeValue: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
-        
-        var size = CGSize.zero
-        if let sizeVal = sizeValue {
-            AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-        }
-        
-        // 计算新位置（居中显示）
-        let newPosition = CGPoint(
-            x: targetFrame.origin.x + (targetFrame.width - size.width) / 2,
-            y: targetFrame.origin.y + (targetFrame.height - size.height) / 2
-        )
-        
-        // 设置窗口位置
         var position = newPosition
         if let positionValue = AXValueCreate(.cgPoint, &position) {
             AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)

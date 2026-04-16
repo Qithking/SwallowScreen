@@ -109,16 +109,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func initializePopoverContent() {
-        print("[Popover] 开始初始化...")
-        
         guard let container = modelContainer else {
-            print("[Popover] modelContainer 为空，尝试重新创建...")
             // 尝试重新创建
-            setupModelContainerWithDebug()
+            setupModelContainer()
             guard let container = modelContainer else {
-                let message = "ModelContainer 创建失败，请查看控制台日志"
-                print("[Popover] \(message)")
-                showErrorView(message: message)
+                showErrorView(message: "ModelContainer 创建失败")
                 return
             }
             setupPopoverWithContainer(container)
@@ -128,42 +123,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupPopoverWithContainer(container)
     }
     
-    private func setupModelContainerWithDebug() {
-        let schema = Schema([AppInfo.self, AppSettings.self])
-        
-        let storeURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("SwallowScreen")
-        
-        print("[ModelContainer] 存储路径: \(storeURL.path)")
-        
-        do {
-            try FileManager.default.createDirectory(at: storeURL, withIntermediateDirectories: true)
-        } catch {
-            print("[ModelContainer] 创建目录失败: \(error)")
-        }
-        
-        let modelConfiguration = ModelConfiguration(
-            schema: schema,
-            url: storeURL.appendingPathComponent("SwallowScreen.store"),
-            allowsSave: true
-        )
-        
-        do {
-            modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
-            print("[ModelContainer] 创建成功!")
-        } catch {
-            print("[ModelContainer] 创建失败: \(error)")
-            print("[ModelContainer] 错误详情: \(type(of: error))")
-        }
-    }
-    
     private func setupPopoverWithContainer(_ container: ModelContainer) {
-        print("[Popover] 创建 AppPopoverView...")
         let contentView = AppPopoverView()
             .modelContainer(container)
         
         popover?.contentViewController = NSHostingController(rootView: contentView)
-        print("[Popover] 初始化完成!")
     }
     
     private func showErrorView(message: String) {

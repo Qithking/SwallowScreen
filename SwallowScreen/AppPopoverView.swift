@@ -222,7 +222,7 @@ struct AppPopoverView: View {
             }
             settings = results.first
         } catch {
-            print("Error fetching settings: \(error)")
+            // 静默处理
         }
     }
     
