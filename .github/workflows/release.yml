@@ -122,7 +122,7 @@ jobs:
           </plist>
           EOF
           
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" SwallowScreen.app/Contents/Info.plist
+          sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/g" SwallowScreen.app/Contents/Info.plist
           
           echo "=== App Bundle Structure ==="
           ls -la SwallowScreen.app/Contents/
