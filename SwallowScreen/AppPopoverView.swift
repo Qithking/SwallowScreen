@@ -22,13 +22,12 @@ struct AppPopoverView: View {
     
     @State private var settings: AppSettings?
     @State private var showWelcomeTip: Bool = false
-    @State private var backgroundOpacity: Double = 1.0
     
     var body: some View {
         ZStack {
-            // 毛玻璃背景
+            // 毛玻璃背景 - 直接从 appSettings 读取透明度
             VisualEffectView(material: .popover, blendingMode: .behindWindow)
-                .opacity(backgroundOpacity)
+                .opacity(appSettings.first?.popoverBackgroundOpacity ?? 1.0)
                 .ignoresSafeArea()
             
             VStack(spacing: 0) {
@@ -222,7 +221,6 @@ struct AppPopoverView: View {
                 modelContext.insert(newSettings)
             }
             settings = results.first
-            backgroundOpacity = settings?.popoverBackgroundOpacity ?? 1.0
         } catch {
             print("Error fetching settings: \(error)")
         }
