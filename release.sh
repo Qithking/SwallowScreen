@@ -3,8 +3,17 @@
 set -e
 
 # 配置
-REPO_URL=$(git remote get-url origin 2>/dev/null | sed 's/.git$//' || echo "")
-REPO_NAME=$(basename "$REPO_URL" 2>/dev/null || echo "SwallowScreen")
+get_remote_info() {
+    local remote_info
+    remote_info=$(git remote -v 2>/dev/null | head -1)
+    if [ -z "$remote_info" ]; then
+        return 1
+    fi
+    # 提取仓库路径，支持 origin、SwallowScreen 等名称
+    echo "$remote_info" | sed -E 's/.*github\.com[:/]([^.]+).*/\1/' | awk '{print $1}'
+}
+
+REPO_NAME=$(get_remote_info || echo "SwallowScreen")
 
 # 颜色输出
 RED='\033[0;31m'
@@ -39,13 +48,14 @@ check_git_status() {
 
 # 获取最新版本号
 get_latest_release() {
-    curl -s "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null | \
+    curl -s "https://api.github.com/repos/Qithking/SwallowScreen/releases/latest" 2>/dev/null | \
         grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || echo ""
 }
 
 # 获取当前 git 版本
 get_current_version() {
-    git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"
+    # 获取本地最新 tag
+    git tag --sort=-version:refname 2>/dev/null | head -1 || echo "v0.0.0"
 }
 
 # 提交并推送代码
@@ -55,10 +65,12 @@ push_to_github() {
     echo ""
     
     # 检查远程仓库
-    if ! git remote -v | grep -q origin; then
-        echo_error "未找到 origin 远程仓库"
+    remote_name=$(git remote 2>/dev/null | head -1)
+    if [ -z "$remote_name" ]; then
+        echo_error "未找到远程仓库"
         exit 1
     fi
+    echo_info "检测到远程仓库: $remote_name"
     
     # 检查分支
     current_branch=$(git branch --show-current)
@@ -93,8 +105,8 @@ push_to_github() {
         git commit -m "$commit_msg"
         
         echo ""
-        echo_info "推送到 origin/main..."
-        git push origin main
+        echo_info "推送到 $remote_name/main..."
+        git push "$remote_name" main
         
         echo_success "代码已成功推送到 GitHub!"
     fi
@@ -120,18 +132,30 @@ create_release() {
         exit 1
     fi
     
+    # 获取远程仓库名称
+    remote_name=$(git remote 2>/dev/null | head -1)
+    if [ -z "$remote_name" ]; then
+        echo_error "未找到远程仓库"
+        exit 1
+    fi
+    echo_info "检测到远程仓库: $remote_name"
+    
     # 获取当前版本
     current_version=$(get_current_version)
     echo_info "当前版本: $current_version"
     
     echo ""
-    read -p "输入新版本号 (格式: v1.0.0): " new_version
+    read -p "输入新版本号 (格式: 1.0.0): " new_version
     
-    # 验证版本格式
-    if ! [[ "$new_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo_error "版本号格式错误，请使用 v*.*.* 格式"
+    # 验证版本格式并添加 v 前缀
+    if [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        new_version="v$new_version"
+    elif ! [[ "$new_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo_error "版本号格式错误，请使用 *.*.* 格式"
         exit 1
     fi
+    
+    echo_info "创建版本: $new_version"
     
     # 检查版本是否已存在
     if git tag | grep -q "^${new_version}$"; then
@@ -145,12 +169,12 @@ create_release() {
     
     echo ""
     echo_info "推送 tag 到 GitHub..."
-    git push origin "$new_version"
+    git push "$remote_name" "$new_version"
     
     echo_success "已创建版本 $new_version 并推送!"
     echo ""
     echo_info "GitHub Actions 将自动开始构建 DMG..."
-    echo_info "查看构建进度: https://github.com/${REPO_NAME}/actions"
+    echo_info "查看构建进度: https://github.com/Qithking/SwallowScreen/actions"
 }
 
 # 下载最新版本
@@ -164,13 +188,13 @@ download_latest() {
     
     # 检查 GitHub CLI
     if command -v gh &> /dev/null && gh auth status &> /dev/null; then
-        latest_info=$(gh release view --json tagName,url 2>/dev/null || echo "")
+        latest_info=$(gh release view --repo Qithking/SwallowScreen --json tagName,url 2>/dev/null || echo "")
         latest_version=$(echo "$latest_info" | grep -o '"tagName"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
     fi
     
     # 备用方案: 使用 API
     if [ -z "$latest_version" ]; then
-        latest_version=$(curl -s "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null | \
+        latest_version=$(curl -s "https://api.github.com/repos/Qithking/SwallowScreen/releases/latest" 2>/dev/null | \
             grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || echo "")
     fi
     
@@ -187,12 +211,12 @@ download_latest() {
     
     # 尝试从 GitHub Release 获取下载链接
     if command -v gh &> /dev/null && gh auth status &> /dev/null; then
-        download_url=$(gh release view "$latest_version" --json assets -q '.assets[] | select(.name | contains("dmg")) | .url' 2>/dev/null || echo "")
+        download_url=$(gh release view "$latest_version" --repo Qithking/SwallowScreen --json assets -q '.assets[] | select(.name | contains("dmg")) | .url' 2>/dev/null || echo "")
     fi
     
     # 构建直接下载链接
     if [ -z "$download_url" ]; then
-        download_url="https://github.com/${REPO_NAME}/releases/download/${latest_version}/${dmg_name}"
+        download_url="https://github.com/Qithking/SwallowScreen/releases/download/${latest_version}/${dmg_name}"
     fi
     
     echo ""
