@@ -21,9 +21,74 @@ class WindowMover: ObservableObject {
     private var lastMovedWindows: Set<String> = [] // 冷却中的窗口
     private var previousWindowPositions: [String: CGPoint] = [:] // 上次窗口位置
     private var movingWindows: Set<String> = [] // 正在移动的窗口
+    private var launchedApps: Set<String> = [] // 已处理过的启动应用（用于一次性移动）
     
     init() {
         _ = checkAccessibilityPermission()
+        setupAppLaunchObserver()
+    }
+    
+    /// 设置应用启动观察者
+    private func setupAppLaunchObserver() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                      let bundleID = app.bundleIdentifier else { return }
+                self?.handleAppLaunch(bundleIdentifier: bundleID, pid: app.processIdentifier)
+            }
+        }
+    }
+    
+    /// 处理应用启动
+    private func handleAppLaunch(bundleIdentifier: String, pid: pid_t) {
+        guard let modelContext = modelContext else { return }
+        
+        // 如果已经处理过这个应用（同一个 PID），跳过
+        let appKey = "\(bundleIdentifier)-\(pid)"
+        if launchedApps.contains(appKey) {
+            return
+        }
+        
+        // 查询应用配置
+        let descriptor = FetchDescriptor<AppInfo>(
+            predicate: #Predicate { $0.bundleIdentifier == bundleIdentifier && $0.isEnabled == true }
+        )
+        
+        guard let appInfo = try? modelContext.fetch(descriptor).first else { return }
+        
+        // 如果设置了目标屏幕且没有启用固定屏幕，移动到目标屏幕一次
+        if let targetScreenID = appInfo.targetScreenID, !appInfo.pinToScreen {
+            guard let targetFrame = getScreenFrame(for: targetScreenID) else { return }
+            
+            // 立即尝试移动（窗口可能还没创建，所以多次重试）
+            var retryCount = 0
+            let maxRetries = 5
+            
+            func tryMoveWindow() {
+                if let app = NSRunningApplication(processIdentifier: pid) {
+                    let moved = self.moveAppWindowsToScreenQuick(pid: pid, targetFrame: targetFrame)
+                    if !moved && retryCount < maxRetries {
+                        retryCount += 1
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            tryMoveWindow()
+                        }
+                    } else {
+                        self.launchedApps.insert(appKey)
+                    }
+                }
+            }
+            
+            tryMoveWindow()
+            
+            // 3秒后移除记录，允许下次启动时重新移动
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.launchedApps.remove(appKey)
+            }
+        }
     }
     
     func configure(modelContext: ModelContext) {
@@ -81,17 +146,25 @@ class WindowMover: ObservableObject {
             let currentScreens = getCurrentScreenMappings()
             
             for appInfo in allApps {
-                guard let targetScreenID = appInfo.targetScreenID else { continue }
+                // 只有启用状态才处理
+                guard appInfo.isEnabled else { continue }
                 
                 // 尝试通过原始 ID 或名称匹配找到当前屏幕
-                var targetScreenFrame = getScreenFrame(for: targetScreenID)
+                var targetScreenFrame: CGRect? = nil
+                var targetScreenID: UInt32? = nil
+                
+                if let screenID = appInfo.targetScreenID {
+                    targetScreenID = screenID
+                    targetScreenFrame = getScreenFrame(for: screenID)
+                }
                 
                 // 如果原始 ID 找不到，尝试通过名称匹配
                 if targetScreenFrame == nil, let screenName = appInfo.targetScreenName {
                     targetScreenFrame = findScreenFrameByName(screenName, currentScreens: currentScreens)
                 }
                 
-                guard let finalTargetFrame = targetScreenFrame else { continue }
+                guard let finalTargetFrame = targetScreenFrame,
+                      let finalScreenID = targetScreenID else { continue }
                 
                 // 找到运行中的应用
                 guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first else {
@@ -102,11 +175,10 @@ class WindowMover: ObservableObject {
                 
                 if appInfo.pinToScreen {
                     // 固定屏幕模式：窗口不能移动到其他屏幕
-                    checkWindowPosition(pid: pid, targetFrame: finalTargetFrame, appBundleID: appInfo.bundleIdentifier, screenID: targetScreenID)
-                } else if appInfo.targetScreenID != nil {
-                    // 普通屏幕模式：窗口在打开时移动到指定屏幕（菜单栏应用等）
-                    moveAppWindowsToScreenIfNeeded(pid: pid, targetFrame: finalTargetFrame, appBundleID: appInfo.bundleIdentifier)
+                    checkWindowPosition(pid: pid, targetFrame: finalTargetFrame, appBundleID: appInfo.bundleIdentifier, screenID: finalScreenID)
                 }
+                // 注意：只有 pinToScreen = true 时才持续限制窗口
+                // 普通设置目标屏幕的应用，只在应用启动时移动一次，之后允许自由移动
             }
         } catch {
             // 静默处理错误
@@ -339,6 +411,47 @@ class WindowMover: ObservableObject {
         
         for window in windows {
             moveWindowToFrame(window, targetFrame: targetFrame)
+        }
+    }
+    
+    /// 快速移动窗口到指定屏幕，返回是否成功
+    private func moveAppWindowsToScreenQuick(pid: pid_t, targetFrame: CGRect) -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        
+        var windowsValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
+        
+        guard result == .success, let windows = windowsValue as? [AXUIElement], !windows.isEmpty else {
+            return false
+        }
+        
+        for window in windows {
+            moveWindowToFrameImmediate(window, targetFrame: targetFrame)
+        }
+        return true
+    }
+    
+    /// 立即移动窗口（无动画）
+    private func moveWindowToFrameImmediate(_ window: AXUIElement, targetFrame: CGRect) {
+        // 获取窗口尺寸
+        var sizeValue: CFTypeRef?
+        AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
+        
+        var size = CGSize.zero
+        if let sizeVal = sizeValue {
+            AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+        }
+        
+        // 计算新位置（居中显示）
+        let newPosition = CGPoint(
+            x: targetFrame.origin.x + (targetFrame.width - size.width) / 2,
+            y: targetFrame.origin.y + (targetFrame.height - size.height) / 2
+        )
+        
+        // 设置窗口位置
+        var position = newPosition
+        if let positionValue = AXValueCreate(.cgPoint, &position) {
+            AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
         }
     }
     
