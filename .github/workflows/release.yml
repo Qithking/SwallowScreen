@@ -70,17 +70,33 @@ jobs:
           # 创建 App Bundle 目录结构
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
-          mkdir -p SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset
           
           # 复制二进制文件
           cp build/SwallowScreen SwallowScreen.app/Contents/MacOS/
           chmod +x SwallowScreen.app/Contents/MacOS/SwallowScreen
           
-          # 复制 Assets.xcassets 目录结构
-          cp -r SwallowScreen/Assets.xcassets/* SwallowScreen.app/Contents/Resources/Assets.xcassets/
-          
           # 复制 HelpView.html
           [ -f SwallowScreen/HelpView.html ] && cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
+          
+          # 生成 .icns 图标文件
+          ICONSET_DIR="SwallowScreen.app/Contents/Resources/AppIcon.iconset"
+          mkdir -p "$ICONSET_DIR"
+          
+          # 复制各种尺寸的图标到 iconset
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/16x16.png" "$ICONSET_DIR/icon_16x16.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/16x16@2x.png" "$ICONSET_DIR/icon_16x16@2x.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/32x32.png" "$ICONSET_DIR/icon_32x32.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/32x32@2x.png" "$ICONSET_DIR/icon_32x32@2x.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/128x128.png" "$ICONSET_DIR/icon_128x128.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/128x128@2x.png" "$ICONSET_DIR/icon_128x128@2x.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/256x256.png" "$ICONSET_DIR/icon_256x256.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/256x256@2x.png" "$ICONSET_DIR/icon_256x256@2x.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/512x512.png" "$ICONSET_DIR/icon_512x512.png" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/512x512@2x.png" "$ICONSET_DIR/icon_512x512@2x.png" 2>/dev/null || true
+          
+          # 使用 iconutil 生成 .icns 文件
+          iconutil -c icns "$ICONSET_DIR" -o "SwallowScreen.app/Contents/Resources/AppIcon.icns"
+          rm -rf "$ICONSET_DIR"
           
           # 获取版本号
           VERSION=${GITHUB_REF#refs/tags/v}
@@ -126,12 +142,10 @@ jobs:
           echo "=== App Bundle Structure ==="
           ls -la SwallowScreen.app/Contents/
           ls -la SwallowScreen.app/Contents/Resources/
-          ls -la SwallowScreen.app/Contents/Resources/Assets.xcassets/
-          ls -la SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/
           
           # 检查图标文件
           echo "=== Icon Files ==="
-          find SwallowScreen.app -name "*.png" -o -name "*.icns" 2>/dev/null
+          find SwallowScreen.app -name "*.icns" -o -name "*.png" 2>/dev/null
 
       - name: Ad-hoc Sign App
         run: |
@@ -149,15 +163,12 @@ jobs:
           mkdir -p dmg_temp
           cp -R SwallowScreen.app dmg_temp/
           
-          # 获取应用图标路径
-          ICON_PATH="dmg_temp/SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/256x256@2x.png"
-          if [ ! -f "$ICON_PATH" ]; then
-            ICON_PATH="dmg_temp/SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/256x256.png"
-          fi
+          # 使用 .icns 作为 DMG 卷图标
+          ICON_PATH="dmg_temp/SwallowScreen.app/Contents/Resources/AppIcon.icns"
           
           echo "=== Using icon: $ICON_PATH ==="
           
-          # 创建 DMG，使用 App 的图标 (create-dmg 支持 PNG)
+          # 创建 DMG
           create-dmg \
             --volname "SwallowScreen" \
             --window-pos 200 120 \
