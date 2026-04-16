@@ -28,7 +28,7 @@ jobs:
 
       - name: Build Universal Binary
         run: |
-          mkdir -p .build/universal
+          mkdir -p build
           
           # 构建 arm64 版本
           swift build --configuration release --arch arm64 2>&1
@@ -42,10 +42,9 @@ jobs:
             exit 1
           fi
           
-          cp "$ARM64_PATH" .build/universal/SwallowScreen-arm64
+          cp "$ARM64_PATH" build/SwallowScreen-arm64
           
-          # 构建 x86_64 版本
-          rm -rf .build
+          # 构建 x86_64 版本 (先保存 arm64 后再删除 .build)
           swift build --configuration release --arch x86_64 2>&1
           
           # 查找 x86_64 二进制文件 (排除 dSYM)
@@ -57,14 +56,14 @@ jobs:
             exit 1
           fi
           
-          cp "$X86_PATH" .build/universal/SwallowScreen-x86_64
+          cp "$X86_PATH" build/SwallowScreen-x86_64
           
           # 合并为 Universal Binary
-          lipo -create .build/universal/SwallowScreen-arm64 .build/universal/SwallowScreen-x86_64 -output .build/universal/SwallowScreen
+          lipo -create build/SwallowScreen-arm64 build/SwallowScreen-x86_64 -output build/SwallowScreen
           
           echo "=== Universal Binary Info ==="
-          lipo -info .build/universal/SwallowScreen
-          file .build/universal/SwallowScreen
+          lipo -info build/SwallowScreen
+          file build/SwallowScreen
 
       - name: Create App Bundle
         run: |
@@ -74,7 +73,7 @@ jobs:
           mkdir -p SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset
           
           # 复制二进制文件
-          cp .build/universal/SwallowScreen SwallowScreen.app/Contents/MacOS/
+          cp build/SwallowScreen SwallowScreen.app/Contents/MacOS/
           chmod +x SwallowScreen.app/Contents/MacOS/SwallowScreen
           
           # 复制资源文件
