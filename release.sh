@@ -245,6 +245,98 @@ download_latest() {
     fi
 }
 
+# 清除失败的 GitHub Actions
+clean_failed_actions() {
+    echo ""
+    echo "=== 清除失败的 GitHub Actions ==="
+    echo ""
+    
+    if ! command -v gh &> /dev/null; then
+        echo_error "需要安装 GitHub CLI"
+        echo "安装命令: brew install gh"
+        exit 1
+    fi
+    
+    if ! gh auth status &> /dev/null; then
+        echo_error "未登录 GitHub"
+        echo "请运行: gh auth login"
+        exit 1
+    fi
+    
+    echo_info "获取失败的 Actions 运行..."
+    
+    # 获取失败的运行
+    failed_runs=$(gh run list --repo Qithking/SwallowScreen --status failure --json databaseId,workflowName --jq '.[] | "\(.databaseId) \(.workflowName)"' 2>/dev/null)
+    
+    if [ -z "$failed_runs" ]; then
+        echo_info "没有失败的 Actions 运行"
+        return
+    fi
+    
+    echo ""
+    echo_info "找到以下失败的运行:"
+    echo "$failed_runs" | while read -r id name; do
+        echo "  - [$id] $name"
+    done
+    
+    echo ""
+    read -p "确认删除所有失败运行? (y/n): " confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        echo ""
+        echo_info "正在删除..."
+        echo "$failed_runs" | while read -r id name; do
+            gh run delete "$id" --repo Qithking/SwallowScreen 2>/dev/null && echo_success "已删除: $name ($id)" || echo_error "删除失败: $id"
+        done
+        echo_success "清理完成!"
+    else
+        echo_info "已取消"
+    fi
+}
+
+# 删除指定 tag
+delete_tag() {
+    echo ""
+    echo "=== 删除指定 Tag ==="
+    echo ""
+    
+    # 获取远程仓库名称
+    remote_name=$(git remote 2>/dev/null | head -1)
+    if [ -z "$remote_name" ]; then
+        echo_error "未找到远程仓库"
+        exit 1
+    fi
+    
+    echo_info "本地 Tags:"
+    git tag --sort=-version:refname | head -10
+    
+    echo ""
+    read -p "输入要删除的 tag 名称 (如 v1.7.8): " tag_name
+    
+    if [ -z "$tag_name" ]; then
+        echo_error "请输入 tag 名称"
+        exit 1
+    fi
+    
+    # 检查本地 tag 是否存在
+    if ! git tag | grep -q "^${tag_name}$"; then
+        echo_error "本地未找到 tag: $tag_name"
+        exit 1
+    fi
+    
+    echo ""
+    read -p "确认删除本地 tag '$tag_name'? (y/n): " confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        git tag -d "$tag_name"
+        echo_success "已删除本地 tag: $tag_name"
+    fi
+    
+    echo ""
+    read -p "同时删除远程 tag '$tag_name'? (y/n): " confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        git push "$remote_name" --delete "$tag_name" 2>/dev/null && echo_success "已删除远程 tag: $tag_name" || echo_warning "远程 tag 可能不存在"
+    fi
+}
+
 # 主菜单
 show_menu() {
     echo ""
@@ -254,6 +346,8 @@ show_menu() {
     echo "║  1. 提交代码到 GitHub (main 分支)                 ║"
     echo "║  2. 发布新版本 (创建 tag 触发 GitHub Actions)     ║"
     echo "║  3. 下载最新版本 DMG                             ║"
+    echo "║  4. 清除失败的 GitHub Actions                    ║"
+    echo "║  5. 删除指定 Tag                                 ║"
     echo "║  0. 退出                                          ║"
     echo "╚══════════════════════════════════════════════════╝"
     echo ""
@@ -265,7 +359,7 @@ main() {
     
     while true; do
         show_menu
-        read -p "请选择操作 (0-3): " choice
+        read -p "请选择操作 (0-5): " choice
         
         case $choice in
             1)
@@ -277,12 +371,18 @@ main() {
             3)
                 download_latest
                 ;;
+            4)
+                clean_failed_actions
+                ;;
+            5)
+                delete_tag
+                ;;
             0)
                 echo_info "再见!"
                 exit 0
                 ;;
             *)
-                echo_error "无效选择，请输入 0-3"
+                echo_error "无效选择，请输入 0-5"
                 ;;
         esac
         

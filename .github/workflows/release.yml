@@ -9,12 +9,20 @@ permissions:
   contents: write
 
 env:
-  SWIFT_VERSION: "5.9"
   PRODUCT_BUNDLE_IDENTIFIER: com.swallowscreen.app
 
 jobs:
-  build-universal:
-    runs-on: macos-14
+  build:
+    strategy:
+      matrix:
+        include:
+          - runs-on: macos-14
+            arch: arm64
+            arch-name: "arm64"
+          - runs-on: macos-13
+            arch: x86_64
+            arch-name: "x86_64"
+    runs-on: ${{ matrix.runs-on }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,8 +34,10 @@ jobs:
         with:
           xcode-version: latest
 
-      - name: Update Info.plist
+      - name: Prepare Resources
         run: |
+          mkdir -p SwallowScreen/Assets.xcassets/AppIcon.appiconset
+          
           cat > SwallowScreen/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -63,128 +73,45 @@ jobs:
           </plist>
           EOF
 
-      - name: Create Entitlements
-        run: |
-          cat > SwallowScreen/SwallowScreen.entitlements << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>com.apple.security.app-sandbox</key>
-              <false/>
-              <key>com.apple.security.automation.apple-events</key>
-              <true/>
-          </dict>
-          </plist>
-          EOF
-
-      - name: Generate Xcode Project (if needed)
-        run: |
-          if [ ! -f "SwallowScreen.xcodeproj/project.pbxproj" ]; then
-            echo "No xcodeproj found, generating from Package.swift..."
-            swift package generate-xcodeproj --output-path SwallowScreen.xcodeproj 2>&1 || true
-          else
-            echo "Using existing xcodeproj"
-          fi
-          ls -la *.xcodeproj 2>/dev/null || echo "No xcodeproj found"
-
-      - name: Resolve Dependencies
-        run: |
-          if [ -f "SwallowScreen.xcodeproj/project.pbxproj" ]; then
-            xcodebuild -project SwallowScreen.xcodeproj -scheme SwallowScreen -configuration Release -destination 'generic/platform=macOS' -resolvePackageDependencies 2>&1 | tail -10
-          fi
-
-      - name: Build arm64
+      - name: Build
         run: |
           rm -rf .build
-          if [ -f "SwallowScreen.xcodeproj/project.pbxproj" ]; then
-            xcodebuild -project SwallowScreen.xcodeproj \
-              -scheme SwallowScreen \
-              -configuration Release \
-              -destination 'platform=macOS,arch=arm64' \
-              -derivedDataPath .build \
-              SWIFT_ACTIVE_COMPILATION_CONDITIONS=RELEASE \
-              CODE_SIGN_IDENTITY="-" \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGNING_ALLOWED=NO \
-              2>&1 | tail -30
-          else
-            swift build -c release --arch arm64
-          fi
+          swift build -c release 2>&1
           
-          echo "=== arm64 Build artifacts ==="
-          ARM64_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
-          echo "Found: $ARM64_BIN"
-          if [ -n "$ARM64_BIN" ]; then
-            file "$ARM64_BIN"
-            mkdir -p build/arm64
-            cp "$ARM64_BIN" build/arm64/
-          fi
-
-      - name: Build x86_64
-        run: |
-          rm -rf .build
-          if [ -f "SwallowScreen.xcodeproj/project.pbxproj" ]; then
-            xcodebuild -project SwallowScreen.xcodeproj \
-              -scheme SwallowScreen \
-              -configuration Release \
-              -destination 'platform=macOS,arch=x86_64' \
-              -derivedDataPath .build \
-              SWIFT_ACTIVE_COMPILATION_CONDITIONS=RELEASE \
-              CODE_SIGN_IDENTITY="-" \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGNING_ALLOWED=NO \
-              2>&1 | tail -30
-          else
-            swift build -c release --arch x86_64
-          fi
-          
-          echo "=== x86_64 Build artifacts ==="
-          X86_BIN=$(find .build -name "SwallowScreen" -type f -executable 2>/dev/null | head -1)
-          echo "Found: $X86_BIN"
-          if [ -n "$X86_BIN" ]; then
-            file "$X86_BIN"
-            mkdir -p build/x86_64
-            cp "$X86_BIN" build/x86_64/
-          fi
-
-      - name: Create Universal Binary
-        run: |
-          mkdir -p build/dmg
-          lipo -create build/arm64/SwallowScreen build/x86_64/SwallowScreen -output build/dmg/SwallowScreen
-          echo "=== Universal Binary Info ==="
-          lipo -info build/dmg/SwallowScreen
-          file build/dmg/SwallowScreen
+          echo "=== Build artifacts ==="
+          find .build -type f 2>/dev/null | head -20
 
       - name: Create App Bundle
         run: |
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
           
-          cp build/dmg/SwallowScreen SwallowScreen.app/Contents/MacOS/
+          BINARY=$(find .build -name "SwallowScreen" -type f 2>/dev/null | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "Error: binary not found"
+            exit 1
+          fi
+          
+          cp "$BINARY" SwallowScreen.app/Contents/MacOS/
           cp SwallowScreen/Info.plist SwallowScreen.app/Contents/
-          [ -f SwallowScreen/SwallowScreen.entitlements ] && cp SwallowScreen/SwallowScreen.entitlements SwallowScreen.app/Contents/
           cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
           [ -f SwallowScreen/HelpView.html ] && cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
           
           chmod +x SwallowScreen.app/Contents/MacOS/SwallowScreen
           
           echo "=== App Bundle Contents ==="
-          ls -la SwallowScreen.app/Contents/
           ls -la SwallowScreen.app/Contents/MacOS/
+          file SwallowScreen.app/Contents/MacOS/SwallowScreen
 
       - name: Create DMG
         run: |
-          # Install create-dmg
           brew install create-dmg
           
-          # Create a temporary source directory
           mkdir -p dmg_temp
           cp -R SwallowScreen.app dmg_temp/
           
-          # Create DMG
           create-dmg \
-            --volname "SwallowScreen" \
+            --volname "SwallowScreen-${{ matrix.arch-name }}" \
             --volsize 256 \
             --window-pos 200 120 \
             --window-size 500 350 \
@@ -193,16 +120,32 @@ jobs:
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
             --skip-jetbrains \
-            "SwallowScreen-${{ github.ref_name }}-universal.dmg" \
+            "SwallowScreen-${{ github.ref_name }}-${{ matrix.arch-name }}.dmg" \
             "dmg_temp/"
-          
-          # Move DMG to root
-          mv "SwallowScreen-${{ github.ref_name }}-universal.dmg" ./
-          
-          echo "=== DMG Created ==="
-          ls -lh "SwallowScreen-${{ github.ref_name }}-universal.dmg"
 
-      - name: Upload DMG to Release
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwallowScreen-${{ matrix.arch-name }}-dmg
+          path: SwallowScreen-*.dmg
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download arm64 DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: SwallowScreen-arm64-dmg
+          path: .
+
+      - name: Download x86_64 DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: SwallowScreen-x86_64-dmg
+          path: .
+
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           body: |
@@ -224,21 +167,11 @@ jobs:
             - 菜单栏应用：不占用 Dock 空间
 
             ### 安装说明
-            1. 下载并打开 DMG 文件
-            2. 将 SwallowScreen.app 拖入 Applications 文件夹
+            1. 下载对应架构的 DMG 文件
+            2. 打开 DMG 文件，将 SwallowScreen.app 拖入 Applications 文件夹
             3. 首次运行时需要在系统设置中授权辅助功能权限
-          files: SwallowScreen-${{ github.ref_name }}-universal.dmg
+          files: SwallowScreen-*.dmg
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: build-artifacts-${{ github.ref_name }}
-          path: |
-            SwallowScreen.app
-            SwallowScreen-${{ github.ref_name }}-universal.dmg
-          retention-days: 7
