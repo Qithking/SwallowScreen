@@ -28,6 +28,21 @@ struct SettingsView: View {
     @State private var recordingHotkey: HotkeyType? = nil
     @State private var localMonitor: Any?
     
+    // 版本更新相关状态
+    @State private var currentVersion: String = ""
+    @State private var latestVersion: String = ""
+    @State private var isCheckingUpdate: Bool = false
+    @State private var updateStatus: UpdateStatus = .idle
+    @State private var downloadURL: String = ""
+    
+    enum UpdateStatus {
+        case idle
+        case checking
+        case available
+        case upToDate
+        case error
+    }
+    
     enum ModifierKey: String, CaseIterable, Hashable {
         case command = "⌘"
         case shift = "⇧"
@@ -119,11 +134,40 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("关于 SwallowScreen")
                                 .font(.headline)
-                            Text("版本 1.0.0")
-                                .foregroundColor(.secondary)
+                            
+                            HStack {
+                                Text("当前版本: \(currentVersion)")
+                                if !latestVersion.isEmpty && latestVersion != currentVersion {
+                                    Text("(最新: \(latestVersion))")
+                                        .foregroundColor(.green)
+                                }
+                            }
+                            .foregroundColor(.secondary)
+                            
+                            Button(action: checkForUpdate) {
+                                HStack {
+                                    if isCheckingUpdate {
+                                        ProgressView()
+                                            .scaleEffect(0.7)
+                                            .padding(.trailing, 4)
+                                    }
+                                    Text(updateButtonText)
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(isCheckingUpdate)
+                            
+                            if updateStatus == .available {
+                                Button(action: downloadUpdate) {
+                                    Label("下载更新", systemImage: "arrow.down.circle.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                            
                             Text("一款帮助你管理应用窗口在不同屏幕上显示的工具。")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                                .padding(.top, 4)
                         }
                         .padding(.vertical, 8)
                     } header: {
@@ -134,9 +178,12 @@ struct SettingsView: View {
                 .scrollContentBackground(.hidden)
             }
         }
-        .frame(width: 400, height: 400)
+        .frame(width: 400, height: 420)
+        .background(Color.white)
         .onAppear {
             loadSettings()
+            loadCurrentVersion()
+            checkForUpdate()
         }
         .onChange(of: recordingHotkey) { _, newValue in
             if newValue != nil {
@@ -273,6 +320,83 @@ struct SettingsView: View {
             } catch {
                 print("Failed to set launch at login: \(error)")
             }
+        }
+    }
+    
+    private func loadCurrentVersion() {
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            currentVersion = version
+        } else {
+            currentVersion = "1.0.0"
+        }
+    }
+    
+    private var updateButtonText: String {
+        switch updateStatus {
+        case .idle:
+            return "检查更新"
+        case .checking:
+            return "检查中..."
+        case .available:
+            return "发现新版本!"
+        case .upToDate:
+            return "已是最新版本"
+        case .error:
+            return "检查更新"
+        }
+    }
+    
+    private func checkForUpdate() {
+        isCheckingUpdate = true
+        updateStatus = .checking
+        
+        guard let url = URL(string: "https://api.github.com/repos/Qithking/SwallowScreen/releases/latest") else {
+            updateStatus = .error
+            isCheckingUpdate = false
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        
+        URLSession.shared.dataTask(with: request) { [self] data, response, error in
+            DispatchQueue.main.async {
+                self.isCheckingUpdate = false
+                
+                guard let data = data, error == nil else {
+                    self.updateStatus = .error
+                    return
+                }
+                
+                do {
+                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let tagName = json["tag_name"] as? String {
+                        self.latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                        
+                        if self.latestVersion == self.currentVersion {
+                            self.updateStatus = .upToDate
+                        } else {
+                            self.updateStatus = .available
+                            if let assets = json["assets"] as? [[String: Any]],
+                               let firstAsset = assets.first,
+                               let browserDownloadURL = firstAsset["browser_download_url"] as? String {
+                                self.downloadURL = browserDownloadURL
+                            }
+                        }
+                    } else {
+                        self.updateStatus = .error
+                    }
+                } catch {
+                    self.updateStatus = .error
+                }
+            }
+        }.resume()
+    }
+    
+    private func downloadUpdate() {
+        if let url = URL(string: downloadURL) {
+            NSWorkspace.shared.open(url)
         }
     }
 }
