@@ -13,13 +13,7 @@ env:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - { runs-on: "macos-14", arch-name: "arm64" }
-          - { runs-on: "macos-13", arch-name: "x86_64" }
-    runs-on: ${{ matrix.config.runs-on }}
+    runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -108,37 +102,15 @@ jobs:
           cp -R SwallowScreen.app dmg_temp/
           
           create-dmg \
-            --volname "SwallowScreen-${{ matrix.config.arch-name }}" \
+            --volname "SwallowScreen" \
             --window-pos 200 120 \
             --window-size 500 350 \
             --icon-size 100 \
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
-            "SwallowScreen-${{ github.ref_name }}-${{ matrix.config.arch-name }}.dmg" \
+            "SwallowScreen-${{ github.ref.name }}.dmg" \
             "dmg_temp/"
-
-      - name: Upload DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: SwallowScreen-${{ matrix.config.arch-name }}-dmg
-          path: SwallowScreen-*.dmg
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download arm64 DMG
-        uses: actions/download-artifact@v4
-        with:
-          name: SwallowScreen-arm64-dmg
-          path: .
-
-      - name: Download x86_64 DMG
-        uses: actions/download-artifact@v4
-        with:
-          name: SwallowScreen-x86_64-dmg
-          path: .
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
@@ -153,7 +125,6 @@ jobs:
 
             ### 支持架构
             - Apple Silicon (M1/M2/M3...)
-            - Intel Mac
 
             ### 功能
             - 固定屏幕：指定应用只能在特定屏幕移动
@@ -162,11 +133,21 @@ jobs:
             - 菜单栏应用：不占用 Dock 空间
 
             ### 安装说明
-            1. 下载对应架构的 DMG 文件
-            2. 打开 DMG 文件，将 SwallowScreen.app 拖入 Applications 文件夹
+            1. 下载并打开 DMG 文件
+            2. 将 SwallowScreen.app 拖入 Applications 文件夹
             3. 首次运行时需要在系统设置中授权辅助功能权限
           files: SwallowScreen-*.dmg
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: SwallowScreen-dmg
+          path: |
+            SwallowScreen.app
+            SwallowScreen-*.dmg
+          retention-days: 7
