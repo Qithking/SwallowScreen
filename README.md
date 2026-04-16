@@ -18,8 +18,8 @@
 ## 界面说明
 
 <div style="display: flex; gap: 20px;">
-  <img src="assets/macshot-clipboard-BEC7CBD7-05E8-449A-B245-72B56E2D7C22.png" alt="托盘菜单" height="300">
-  <img src="assets/macshot-clipboard-ECA8E4BF-0929-43B0-80F3-D352031B6048.png" alt="设置窗口" height="300">
+  <img src="assets/clipboard-BEC7CBD7-05E8-449A-B245-72B56E2D7C22.png" alt="托盘菜单" height="300">
+  <img src="assets/clipboard-ECA8E4BF-0929-43B0-80F3-D352031B6048.png" alt="设置窗口" height="300">
 </div>
 
 ### 快捷键
