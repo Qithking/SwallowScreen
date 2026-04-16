@@ -14,15 +14,12 @@ env:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          - runs-on: macos-14
-            arch: arm64
-            arch-name: "arm64"
-          - runs-on: macos-13
-            arch: x86_64
-            arch-name: "x86_64"
-    runs-on: ${{ matrix.runs-on }}
+        config:
+          - { runs-on: "macos-14", arch-name: "arm64" }
+          - { runs-on: "macos-13", arch-name: "x86_64" }
+    runs-on: ${{ matrix.config.runs-on }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -111,21 +108,20 @@ jobs:
           cp -R SwallowScreen.app dmg_temp/
           
           create-dmg \
-            --volname "SwallowScreen-${{ matrix.arch-name }}" \
+            --volname "SwallowScreen-${{ matrix.config.arch-name }}" \
             --window-pos 200 120 \
             --window-size 500 350 \
             --icon-size 100 \
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
-            --skip-jetbrains \
-            "SwallowScreen-${{ github.ref_name }}-${{ matrix.arch-name }}.dmg" \
+            "SwallowScreen-${{ github.ref_name }}-${{ matrix.config.arch-name }}.dmg" \
             "dmg_temp/"
 
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: SwallowScreen-${{ matrix.arch-name }}-dmg
+          name: SwallowScreen-${{ matrix.config.arch-name }}-dmg
           path: SwallowScreen-*.dmg
 
   release:
