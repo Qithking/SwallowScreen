@@ -64,26 +64,74 @@ jobs:
           </plist>
           EOF
 
-      - name: Build
+      - name: Generate Xcode Project
+        run: |
+          swift package generate-xcodeproj --output-path SwallowScreen.xcodeproj 2>&1
+          ls -la SwallowScreen.xcodeproj/
+
+      - name: Build arm64
         run: |
           rm -rf .build
-          swift build -c release 2>&1
+          xcodebuild -project SwallowScreen.xcodeproj \
+            -scheme SwallowScreen \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath .build/arm64 \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS=RELEASE \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tail -20
           
-          echo "=== Build artifacts ==="
-          find .build -type f 2>/dev/null | head -20
+          echo "=== arm64 artifacts ==="
+          find .build/arm64 -name "SwallowScreen" -type f 2>/dev/null || echo "Not found"
+
+      - name: Build x86_64
+        run: |
+          rm -rf .build/x86_64
+          xcodebuild -project SwallowScreen.xcodeproj \
+            -scheme SwallowScreen \
+            -configuration Release \
+            -destination 'platform=macOS,arch=x86_64' \
+            -derivedDataPath .build/x86_64 \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS=RELEASE \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tail -20
+          
+          echo "=== x86_64 artifacts ==="
+          find .build/x86_64 -name "SwallowScreen" -type f 2>/dev/null || echo "Not found"
+
+      - name: Create Universal Binary
+        run: |
+          mkdir -p build
+          
+          ARM64_BIN=$(find .build/arm64 -name "SwallowScreen" -type f 2>/dev/null | head -1)
+          X86_BIN=$(find .build/x86_64 -name "SwallowScreen" -type f 2>/dev/null | head -1)
+          
+          if [ -z "$ARM64_BIN" ] || [ -z "$X86_BIN" ]; then
+            echo "Error: Missing binaries"
+            echo "arm64: $ARM64_BIN"
+            echo "x86: $X86_BIN"
+            exit 1
+          fi
+          
+          cp "$ARM64_BIN" build/SwallowScreen-arm64
+          cp "$X86_BIN" build/SwallowScreen-x86
+          
+          lipo -create build/SwallowScreen-arm64 build/SwallowScreen-x86 -output build/SwallowScreen
+          
+          echo "=== Universal Binary Info ==="
+          lipo -info build/SwallowScreen
+          file build/SwallowScreen
 
       - name: Create App Bundle
         run: |
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
           
-          BINARY=$(find .build -name "SwallowScreen" -type f 2>/dev/null | head -1)
-          if [ -z "$BINARY" ]; then
-            echo "Error: binary not found"
-            exit 1
-          fi
-          
-          cp "$BINARY" SwallowScreen.app/Contents/MacOS/
+          cp build/SwallowScreen SwallowScreen.app/Contents/MacOS/
           cp SwallowScreen/Info.plist SwallowScreen.app/Contents/
           cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
           [ -f SwallowScreen/HelpView.html ] && cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
@@ -92,7 +140,7 @@ jobs:
           
           echo "=== App Bundle Contents ==="
           ls -la SwallowScreen.app/Contents/MacOS/
-          file SwallowScreen.app/Contents/MacOS/SwallowScreen
+          lipo -info SwallowScreen.app/Contents/MacOS/SwallowScreen
 
       - name: Create DMG
         run: |
@@ -125,6 +173,7 @@ jobs:
 
             ### 支持架构
             - Apple Silicon (M1/M2/M3...)
+            - Intel Mac
 
             ### 功能
             - 固定屏幕：指定应用只能在特定屏幕移动
