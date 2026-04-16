@@ -12,6 +12,35 @@ import Carbon.HIToolbox
 import AppKit
 
 struct SettingsView: View {
+    @State private var selectedTab: Int = 0
+    
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            GeneralSettingsView()
+                .tabItem {
+                    Label("通用", systemImage: "gear")
+                }
+                .tag(0)
+            
+            HotkeySettingsView()
+                .tabItem {
+                    Label("快捷键", systemImage: "keyboard")
+                }
+                .tag(1)
+            
+            AboutView()
+                .tabItem {
+                    Label("关于", systemImage: "info.circle")
+                }
+                .tag(2)
+        }
+        .frame(width: 500, height: 400)
+        .background(Color.white)
+    }
+}
+
+// MARK: - 通用设置视图
+struct GeneralSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var appSettings: [AppSettings]
     
@@ -19,7 +48,87 @@ struct SettingsView: View {
     @State private var showHelpTips: Bool = true
     @State private var popoverBackgroundOpacity: Double = 1.0
     
-    // 快捷键相关状态
+    var body: some View {
+        Form {
+            Section {
+                Toggle("开机启动", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, newValue in
+                        updateSetting { $0.launchAtLogin = newValue }
+                        setLaunchAtLogin(enabled: newValue)
+                    }
+            } header: {
+                Text("基础设置")
+            }
+            
+            Section {
+                Toggle("显示帮助提示", isOn: $showHelpTips)
+                    .onChange(of: showHelpTips) { _, newValue in
+                        updateSetting { $0.showHelpTips = newValue }
+                    }
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("弹窗背景透明度")
+                        Spacer()
+                        Text("\(Int(popoverBackgroundOpacity * 100))%")
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(value: $popoverBackgroundOpacity, in: 0.3...1.0, step: 0.1)
+                        .onChange(of: popoverBackgroundOpacity) { _, newValue in
+                            updateSetting { $0.popoverBackgroundOpacity = newValue }
+                        }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Text("界面设置")
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .onAppear {
+            loadSettings()
+        }
+    }
+    
+    private func loadSettings() {
+        if let settings = appSettings.first {
+            launchAtLogin = settings.launchAtLogin
+            showHelpTips = settings.showHelpTips
+            popoverBackgroundOpacity = settings.popoverBackgroundOpacity
+        }
+    }
+    
+    private func updateSetting(_ update: (AppSettings) -> Void) {
+        if let settings = appSettings.first {
+            update(settings)
+            settings.updatedAt = Date()
+        } else {
+            let newSettings = AppSettings()
+            update(newSettings)
+            modelContext.insert(newSettings)
+        }
+    }
+    
+    private func setLaunchAtLogin(enabled: Bool) {
+        if #available(macOS 13.0, *) {
+            do {
+                if enabled {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                print("Failed to set launch at login: \(error)")
+            }
+        }
+    }
+}
+
+// MARK: - 快捷键设置视图
+struct HotkeySettingsView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query private var appSettings: [AppSettings]
+    
     @State private var setScreenModifiers: Set<ModifierKey> = [.command, .shift]
     @State private var setScreenKeyCode: UInt32 = 0x18
     @State private var clearScreenModifiers: Set<ModifierKey> = [.command, .shift]
@@ -27,21 +136,6 @@ struct SettingsView: View {
     
     @State private var recordingHotkey: HotkeyType? = nil
     @State private var localMonitor: Any?
-    
-    // 版本更新相关状态
-    @State private var currentVersion: String = ""
-    @State private var latestVersion: String = ""
-    @State private var isCheckingUpdate: Bool = false
-    @State private var updateStatus: UpdateStatus = .idle
-    @State private var downloadURL: String = ""
-    
-    enum UpdateStatus {
-        case idle
-        case checking
-        case available
-        case upToDate
-        case error
-    }
     
     enum ModifierKey: String, CaseIterable, Hashable {
         case command = "⌘"
@@ -56,199 +150,42 @@ struct SettingsView: View {
     }
     
     var body: some View {
-        ZStack {
-            // 毛玻璃背景
-            VisualEffectView(material: .windowBackground, blendingMode: .behindWindow)
-                .ignoresSafeArea()
-            
-            VStack(spacing: 0) {
-                // 设置内容
-                Form {
-                    Section {
-                        Toggle("开机启动", isOn: $launchAtLogin)
-                            .onChange(of: launchAtLogin) { _, newValue in
-                                updateSetting { $0.launchAtLogin = newValue }
-                                setLaunchAtLogin(enabled: newValue)
-                            }
-                    } header: {
-                        Text("基础设置")
-                    }
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 16) {
+                    HotkeyRecorderView(
+                        title: "设置前台应用屏幕",
+                        modifiers: $setScreenModifiers,
+                        keyCode: $setScreenKeyCode,
+                        isRecording: recordingHotkey == .setScreen,
+                        onStartRecording: { recordingHotkey = .setScreen }
+                    )
+                    .onChange(of: setScreenModifiers) { _, _ in saveHotkey(.setScreen) }
+                    .onChange(of: setScreenKeyCode) { _, _ in saveHotkey(.setScreen) }
                     
-                    Section {
-                        VStack(alignment: .leading, spacing: 16) {
-                            // 快捷键 1: 设置屏幕
-                            HotkeyRecorderView(
-                                title: "设置前台应用屏幕",
-                                modifiers: $setScreenModifiers,
-                                keyCode: $setScreenKeyCode,
-                                isRecording: recordingHotkey == .setScreen,
-                                onStartRecording: { recordingHotkey = .setScreen }
-                            )
-                            .onChange(of: setScreenModifiers) { _, _ in saveHotkey(.setScreen) }
-                            .onChange(of: setScreenKeyCode) { _, _ in saveHotkey(.setScreen) }
-                            
-                            // 快捷键 2: 清除屏幕
-                            HotkeyRecorderView(
-                                title: "取消前台应用屏幕设置",
-                                modifiers: $clearScreenModifiers,
-                                keyCode: $clearScreenKeyCode,
-                                isRecording: recordingHotkey == .clearScreen,
-                                onStartRecording: { recordingHotkey = .clearScreen }
-                            )
-                            .onChange(of: clearScreenModifiers) { _, _ in saveHotkey(.clearScreen) }
-                            .onChange(of: clearScreenKeyCode) { _, _ in saveHotkey(.clearScreen) }
-                        }
-                        .padding(.vertical, 8)
-                    } header: {
-                        Text("快捷键")
-                    } footer: {
-                        Text("点击快捷键区域录制新快捷键")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    Section {
-                        Toggle("显示帮助提示", isOn: $showHelpTips)
-                            .onChange(of: showHelpTips) { _, newValue in
-                                updateSetting { $0.showHelpTips = newValue }
-                            }
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("弹窗背景透明度")
-                                Spacer()
-                                Text("\(Int(popoverBackgroundOpacity * 100))%")
-                                    .foregroundColor(.secondary)
-                            }
-                            Slider(value: $popoverBackgroundOpacity, in: 0.3...1.0, step: 0.1)
-                                .onChange(of: popoverBackgroundOpacity) { _, newValue in
-                                    updateSetting { $0.popoverBackgroundOpacity = newValue }
-                                }
-                        }
-                        .padding(.vertical, 4)
-                    } header: {
-                        Text("界面设置")
-                    }
-                    
-                    Section {
-                        VStack(spacing: 16) {
-                            // 应用图标和名称
-                            HStack(spacing: 12) {
-                                if let appIcon = NSApplication.shared.icon {
-                                    Image(nsImage: appIcon)
-                                        .resizable()
-                                        .frame(width: 64, height: 64)
-                                        .cornerRadius(12)
-                                }
-                                
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("SwallowScreen")
-                                        .font(.title2)
-                                        .fontWeight(.semibold)
-                                    
-                                    HStack {
-                                        Text("版本 \(currentVersion)")
-                                            .foregroundColor(.secondary)
-                                        if !latestVersion.isEmpty && latestVersion != currentVersion {
-                                            Text("→ \(latestVersion)")
-                                                .foregroundColor(.green)
-                                                .fontWeight(.medium)
-                                        }
-                                    }
-                                    .font(.caption)
-                                }
-                                
-                                Spacer()
-                            }
-                            
-                            Divider()
-                            
-                            // 简介
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("应用简介")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.secondary)
-                                Text("一款帮助你管理应用窗口在不同屏幕上显示的工具。支持固定应用到指定屏幕、多屏幕窗口管理、全局快捷键操作。")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            
-                            // 开发者信息
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("开发者")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.secondary)
-                                Text("Qithking")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            
-                            // GitHub 链接
-                            Button(action: openGitHub) {
-                                HStack {
-                                    Image(systemName: "link")
-                                    Text("GitHub 项目地址")
-                                    Spacer()
-                                    Image(systemName: "arrow.up.right.square")
-                                }
-                                .font(.caption)
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.accentColor)
-                            
-                            // 许可证
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("开源协议")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.secondary)
-                                Text("MIT License")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            
-                            // 检查更新按钮
-                            Button(action: checkForUpdate) {
-                                HStack {
-                                    if isCheckingUpdate {
-                                        ProgressView()
-                                            .scaleEffect(0.7)
-                                    }
-                                    Text(updateButtonText)
-                                        .frame(maxWidth: .infinity)
-                                }
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(isCheckingUpdate)
-                            
-                            if updateStatus == .available {
-                                Button(action: downloadUpdate) {
-                                    Label("下载新版本", systemImage: "arrow.down.circle.fill")
-                                        .frame(maxWidth: .infinity)
-                                }
-                                .buttonStyle(.borderedProminent)
-                            }
-                        }
-                        .padding(.vertical, 8)
-                    } header: {
-                        Text("关于")
-                    }
+                    HotkeyRecorderView(
+                        title: "取消前台应用屏幕设置",
+                        modifiers: $clearScreenModifiers,
+                        keyCode: $clearScreenKeyCode,
+                        isRecording: recordingHotkey == .clearScreen,
+                        onStartRecording: { recordingHotkey = .clearScreen }
+                    )
+                    .onChange(of: clearScreenModifiers) { _, _ in saveHotkey(.clearScreen) }
+                    .onChange(of: clearScreenKeyCode) { _, _ in saveHotkey(.clearScreen) }
                 }
-                .formStyle(.grouped)
-                .scrollContentBackground(.hidden)
+                .padding(.vertical, 8)
+            } header: {
+                Text("快捷键设置")
+            } footer: {
+                Text("点击快捷键区域录制新快捷键")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
         }
-        .frame(width: 400, height: 520)
-        .background(Color.white)
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear {
             loadSettings()
-            loadCurrentVersion()
-            checkForUpdate()
         }
         .onChange(of: recordingHotkey) { _, newValue in
             if newValue != nil {
@@ -271,7 +208,6 @@ struct SettingsView: View {
             if event.modifierFlags.contains(.option) { flags |= UInt32(optionKey) }
             if event.modifierFlags.contains(.control) { flags |= UInt32(controlKey) }
             
-            // ESC 取消录制
             if keyCode == 0x35 {
                 DispatchQueue.main.async {
                     self.recordingHotkey = nil
@@ -279,7 +215,6 @@ struct SettingsView: View {
                 return nil
             }
             
-            // 必须有修饰键
             if flags == 0 {
                 return nil
             }
@@ -302,11 +237,6 @@ struct SettingsView: View {
     
     private func loadSettings() {
         if let settings = appSettings.first {
-            launchAtLogin = settings.launchAtLogin
-            showHelpTips = settings.showHelpTips
-            popoverBackgroundOpacity = settings.popoverBackgroundOpacity
-            
-            // 加载快捷键设置
             setScreenKeyCode = UInt32(settings.setScreenKeyCode)
             clearScreenKeyCode = UInt32(settings.clearScreenKeyCode)
             
@@ -344,8 +274,6 @@ struct SettingsView: View {
                 settings.clearScreenModifiers = modifiersToCarbon(clearScreenModifiers)
             }
             settings.updatedAt = Date()
-            
-            // 通知 AppDelegate 重新注册快捷键
             NotificationCenter.default.post(name: .hotkeysUpdated, object: nil)
         }
     }
@@ -362,37 +290,151 @@ struct SettingsView: View {
             break
         }
     }
+}
+
+// MARK: - 关于视图
+struct AboutView: View {
+    @State private var currentVersion: String = ""
+    @State private var latestVersion: String = ""
+    @State private var isCheckingUpdate: Bool = false
+    @State private var updateStatus: UpdateStatus = .idle
+    @State private var downloadURL: String = ""
     
-    private func updateSetting(_ update: (AppSettings) -> Void) {
-        if let settings = appSettings.first {
-            update(settings)
-            settings.updatedAt = Date()
-        } else {
-            let newSettings = AppSettings()
-            update(newSettings)
-            modelContext.insert(newSettings)
-        }
+    enum UpdateStatus {
+        case idle
+        case checking
+        case available
+        case upToDate
+        case error
     }
     
-    private func setLaunchAtLogin(enabled: Bool) {
-        if #available(macOS 13.0, *) {
-            do {
-                if enabled {
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                // 应用图标和名称
+                HStack(spacing: 16) {
+                    if let appIcon = NSImage(named: NSImage.applicationIconName) {
+                        Image(nsImage: appIcon)
+                            .resizable()
+                            .frame(width: 80, height: 80)
+                            .cornerRadius(16)
+                    } else {
+                        Image("AppIcon")
+                            .resizable()
+                            .frame(width: 80, height: 80)
+                            .cornerRadius(16)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("SwallowScreen")
+                            .font(.title)
+                            .fontWeight(.bold)
+                        
+                        HStack {
+                            Text("版本 \(currentVersion)")
+                                .foregroundColor(.secondary)
+                            if !latestVersion.isEmpty && latestVersion != currentVersion {
+                                Text("→ \(latestVersion)")
+                                    .foregroundColor(.green)
+                                    .fontWeight(.medium)
+                            }
+                        }
+                        .font(.subheadline)
+                    }
+                    
+                    Spacer()
                 }
-            } catch {
-                print("Failed to set launch at login: \(error)")
+                .padding(.horizontal)
+                .padding(.top)
+                
+                Divider()
+                    .padding(.horizontal)
+                
+                // 应用简介
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("应用简介")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                    Text("一款帮助你管理应用窗口在不同屏幕上显示的工具。支持固定应用到指定屏幕、多屏幕窗口管理、全局快捷键操作。")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                
+                // 开发者信息
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("开发者")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                    Text("Qithking")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                
+                // GitHub 链接
+                Button(action: openGitHub) {
+                    HStack {
+                        Image(systemName: "link")
+                        Text("GitHub 项目地址")
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square")
+                    }
+                    .font(.subheadline)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.accentColor)
+                .padding(.horizontal)
+                
+                // 许可证
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("开源协议")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.secondary)
+                    Text("GNU General Public License v3.0 (GPLv3)")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal)
+                
+                Spacer(minLength: 20)
+                
+                // 检查更新按钮
+                VStack(spacing: 12) {
+                    Button(action: checkForUpdate) {
+                        HStack {
+                            if isCheckingUpdate {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                            }
+                            Text(updateButtonText)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isCheckingUpdate)
+                    
+                    if updateStatus == .available {
+                        Button(action: downloadUpdate) {
+                            Label("下载新版本", systemImage: "arrow.down.circle.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.bottom)
             }
         }
-    }
-    
-    private func loadCurrentVersion() {
-        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-            currentVersion = version
-        } else {
-            currentVersion = "1.0.0"
+        .onAppear {
+            loadCurrentVersion()
+            checkForUpdate()
         }
     }
     
@@ -408,6 +450,14 @@ struct SettingsView: View {
             return "已是最新版本"
         case .error:
             return "检查更新"
+        }
+    }
+    
+    private func loadCurrentVersion() {
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            currentVersion = version
+        } else {
+            currentVersion = "1.0.0"
         }
     }
     
@@ -475,7 +525,7 @@ struct SettingsView: View {
 // MARK: - 快捷键录制视图
 struct HotkeyRecorderView: View {
     let title: String
-    @Binding var modifiers: Set<SettingsView.ModifierKey>
+    @Binding var modifiers: Set<HotkeySettingsView.ModifierKey>
     @Binding var keyCode: UInt32
     let isRecording: Bool
     let onStartRecording: () -> Void
@@ -483,7 +533,6 @@ struct HotkeyRecorderView: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                // 快捷键显示 - 可点击
                 Button(action: {
                     onStartRecording()
                 }) {
@@ -531,7 +580,6 @@ struct HotkeyRecorderView: View {
             0x62: "F7", 0x64: "F8", 0x65: "F9", 0x6D: "F10", 0x67: "F11", 0x6F: "F12"
         ]
         
-        // 数字键 1-0
         if keyCode >= 0x12 && keyCode <= 0x1D {
             let charValue = UInt8(keyCode - 0x12 + 49)
             return String(UnicodeScalar(charValue))
@@ -544,8 +592,6 @@ struct HotkeyRecorderView: View {
 // MARK: - 通知名称
 extension Notification.Name {
     static let hotkeysUpdated = Notification.Name("hotkeysUpdated")
-    static let recordingHotkey = Notification.Name("recordingHotkey")
-    static let appSettingsChanged = Notification.Name("appSettingsChanged")
 }
 
 #Preview {
