@@ -342,10 +342,7 @@ struct AppPopoverView: View {
         NotificationCenter.default.post(name: .openSettingsWindow, object: nil)
     }
     
-    private func openHelp() {
-        NotificationCenter.default.post(name: .openHelpWindow, object: nil)
-    }
-    
+
     private var updateButtonText: String {
         switch updateStatus {
         case .idle, .error:
@@ -558,7 +555,7 @@ struct AppRowView: View {
 // MARK: - 通知名称
 extension Notification.Name {
     static let openSettingsWindow = Notification.Name("openSettingsWindow")
-    static let openHelpWindow = Notification.Name("openHelpWindow")
+
     static let pinToScreenChanged = Notification.Name("pinToScreenChanged")
 }
 

@@ -9,16 +9,14 @@ import AppKit
 import SwiftUI
 import SwiftData
 import Carbon.HIToolbox
-import WebKit
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var appWindow: NSWindow?
+    private var appPopover: NSPopover?
     private var modelContainer: ModelContainer?
     private var windowMover: WindowMover?
     private var settingsWindow: NSWindow?
-    private var helpWindow: NSWindow?
     private var hotkeyObserver: Any?
     private var permissionCheckTimer: Timer? // 权限检查定时器
     
@@ -87,57 +85,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    private func initializeAppWindow() {
+    private func initializePopover() {
         guard let container = modelContainer else {
             setupModelContainer()
             guard let container = modelContainer else {
                 return
             }
-            setupAppWindowWithContainer(container)
+            setupPopoverWithContainer(container)
             return
         }
         
-        setupAppWindowWithContainer(container)
+        setupPopoverWithContainer(container)
     }
     
-    private func setupAppWindowWithContainer(_ container: ModelContainer) {
+    private func setupPopoverWithContainer(_ container: ModelContainer) {
         let contentView = AppPopoverView()
             .modelContainer(container)
         
         let hostingController = NSHostingController(rootView: contentView)
         
-        let window = NSWindow(contentViewController: hostingController)
-        window.title = "SwallowScreen"
-        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
-        window.minSize = NSSize(width: 360, height: 300)
-        window.maxSize = NSSize(width: 360, height: 800)
-        window.setContentSize(NSSize(width: 360, height: 500))
-        window.level = .floating
-        window.isReleasedWhenClosed = false
+        let popover = NSPopover()
+        popover.contentViewController = hostingController
+        popover.behavior = .transient
+        popover.animates = true
         
-        appWindow = window
+        appPopover = popover
     }
     
     @objc private func toggleAppWindow() {
-        if let window = appWindow {
-            if window.isVisible {
-                window.close()
-            } else {
-                if let button = statusItem?.button {
-                    let buttonRect = button.window?.convertToScreen(button.bounds) ?? .zero
-                    window.setFrameOrigin(NSPoint(x: buttonRect.midX - 180, y: buttonRect.minY - 510))
-                }
-                window.makeKeyAndOrderFront(nil)
+        guard let button = statusItem?.button else { return }
+        
+        if let popover = appPopover, popover.isShown {
+            popover.performClose(nil)
+        } else {
+            if appPopover == nil {
+                initializePopover()
+            }
+            if let popover = appPopover {
+                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate(ignoringOtherApps: true)
             }
-        } else {
-            initializeAppWindow()
-            if let button = statusItem?.button {
-                let buttonRect = button.window?.convertToScreen(button.bounds) ?? .zero
-                appWindow?.setFrameOrigin(NSPoint(x: buttonRect.midX - 180, y: buttonRect.minY - 510))
-            }
-            appWindow?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
         }
     }
     
@@ -155,13 +142,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self,
             selector: #selector(openSettingsWindow),
             name: .openSettingsWindow,
-            object: nil
-        )
-        
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(openHelpWindow),
-            name: .openHelpWindow,
             object: nil
         )
         
@@ -366,8 +346,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - 设置窗口
     @objc private func openSettingsWindow() {
-        // 关闭 appWindow
-        appWindow?.close()
+        // 关闭 popover
+        appPopover?.performClose(nil)
         
         // 如果窗口已存在，先关闭再重新创建以确保居中
         if settingsWindow != nil {
@@ -413,54 +393,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     
-    // MARK: - 帮助窗口
-    @objc private func openHelpWindow() {
-        // 关闭 appWindow
-        appWindow?.close()
-        
-        // 如果窗口已存在，关闭并重新创建
-        if helpWindow != nil {
-            helpWindow?.close()
-            helpWindow = nil
-        }
-        
-        // 获取帮助 HTML 文件路径
-        guard let htmlPath = Bundle.main.path(forResource: "HelpView", ofType: "html") else {
-            print("HelpView.html not found")
-            // 使用内置 URL
-            if let url = URL(string: "https://github.com/thking/SwallowScreen") {
-                NSWorkspace.shared.open(url)
-            }
-            return
-        }
-        
-        let htmlURL = URL(fileURLWithPath: htmlPath)
-        
-        // 创建 WKWebView
-        let webView = WKWebView()
-        webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
-        
-        let viewController = NSViewController()
-        viewController.view = webView
-        
-        let window = NSWindow(contentViewController: viewController)
-        window.title = "SwallowScreen 使用帮助"
-        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
-        window.level = .floating
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        
-        // 设置窗口大小
-        window.setContentSize(NSSize(width: 900, height: 700))
-        window.minSize = NSSize(width: 600, height: 400)
-        window.center()
-        
-        helpWindow = window
-        
-        helpWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-    
     @objc private func screenConfigurationChanged() {
         // 屏幕配置变化时的处理
     }
@@ -486,8 +418,6 @@ extension AppDelegate: NSWindowDelegate {
         if let window = notification.object as? NSWindow {
             if window == settingsWindow {
                 settingsWindow = nil
-            } else if window == helpWindow {
-                helpWindow = nil
             }
         }
     }
