@@ -168,27 +168,10 @@ jobs:
             CHANGELOG=$(git log --oneline --format='  - %s' | head -20 2>/dev/null || echo "  - 无更新内容")
           fi
           
-          {
-            echo "## SwallowScreen"
-            echo ""
-            echo "多屏幕窗口管理工具"
-            echo ""
-            echo "### 系统要求"
-            echo "  - macOS 14.0+"
-            echo ""
-            echo "### 支持架构"
-            echo "  - Apple Silicon (M1/M2/M3...)"
-            echo "  - Intel Mac"
-            echo ""
+          {            
             echo "### 更新内容"
             echo "$CHANGELOG"
-            echo ""
-            echo "### 功能"
-            echo "  - 固定屏幕：指定应用只能在特定屏幕移动"
-            echo "  - 多屏幕支持：为每个应用指定首选显示屏幕"
-            echo "  - 全局快捷键：快速设置前台应用的屏幕"
-            echo "  - 菜单栏应用：不占用 Dock 空间"
-            echo ""
+            echo ""           
             echo "### 安装说明"
             echo "  1. 下载并打开 DMG 文件"
             echo "  2. 将 SwallowScreen.app 拖入 Applications 文件夹"
