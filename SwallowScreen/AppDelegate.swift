@@ -58,14 +58,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let modelConfiguration = ModelConfiguration(
             schema: schema,
-            url: storeURL.appendingPathComponent("SwallowScreen.store"),
-            allowsSave: true
+            url: storeURL.appendingPathComponent("SwallowScreen.store")
         )
         
-        do {
-            modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            print("ModelContainer creation failed: \(error)")
+        modelContainer = try? ModelContainer(for: schema, configurations: [modelConfiguration])
+        
+        if modelContainer == nil {
+            print("ModelContainer creation failed")
         }
     }
     
