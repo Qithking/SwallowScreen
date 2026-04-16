@@ -168,7 +168,7 @@ jobs:
             CHANGELOG=$(git log --oneline --format='- %s' | head -20 2>/dev/null || echo "无更新内容")
           fi
           
-          cat << 'RELEASE_EOF' > release_body.txt
+          cat > release_body.txt << 'RELEASE_EOF'
 ## SwallowScreen
 
 多屏幕窗口管理工具
@@ -197,7 +197,6 @@ CHANGELOG_PLACEHOLDER
 RELEASE_EOF
           
           sed -i "s/CHANGELOG_PLACEHOLDER/$CHANGELOG/g" release_body.txt
-          echo "RELEASE_BODY_FILE=release_body.txt" >> $GITHUB_ENV
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
