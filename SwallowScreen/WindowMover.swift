@@ -77,21 +77,83 @@ class WindowMover: ObservableObject {
             let descriptor = FetchDescriptor<AppInfo>()
             let allApps = try modelContext.fetch(descriptor)
             
-            let pinnedApps = allApps.filter { $0.pinToScreen && $0.targetScreenID != nil }
+            // 获取当前所有屏幕信息
+            let currentScreens = getCurrentScreenMappings()
             
-            for appInfo in pinnedApps {
-                guard let targetScreenID = appInfo.targetScreenID,
-                      let targetScreenFrame = getScreenFrame(for: targetScreenID),
-                      let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first else {
+            for appInfo in allApps {
+                guard let targetScreenID = appInfo.targetScreenID else { continue }
+                
+                // 尝试通过原始 ID 或名称匹配找到当前屏幕
+                var targetScreenFrame = getScreenFrame(for: targetScreenID)
+                
+                // 如果原始 ID 找不到，尝试通过名称匹配
+                if targetScreenFrame == nil, let screenName = appInfo.targetScreenName {
+                    targetScreenFrame = findScreenFrameByName(screenName, currentScreens: currentScreens)
+                }
+                
+                guard let finalTargetFrame = targetScreenFrame else { continue }
+                
+                // 找到运行中的应用
+                guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first else {
                     continue
                 }
                 
                 let pid = app.processIdentifier
-                checkWindowPosition(pid: pid, targetFrame: targetScreenFrame, appBundleID: appInfo.bundleIdentifier, screenID: targetScreenID)
+                
+                if appInfo.pinToScreen {
+                    // 固定屏幕模式：窗口不能移动到其他屏幕
+                    checkWindowPosition(pid: pid, targetFrame: finalTargetFrame, appBundleID: appInfo.bundleIdentifier, screenID: targetScreenID)
+                } else if appInfo.targetScreenID != nil {
+                    // 普通屏幕模式：窗口在打开时移动到指定屏幕（菜单栏应用等）
+                    moveAppWindowsToScreenIfNeeded(pid: pid, targetFrame: finalTargetFrame, appBundleID: appInfo.bundleIdentifier)
+                }
             }
         } catch {
             // 静默处理错误
         }
+    }
+    
+    /// 获取当前屏幕映射
+    private func getCurrentScreenMappings() -> [(id: UInt32, name: String, frame: CGRect)] {
+        var mappings: [(id: UInt32, name: String, frame: CGRect)] = []
+        for screen in NSScreen.screens {
+            let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            let name = screen.localizedName
+            let frame = screen.frame
+            mappings.append((id: screenID, name: name, frame: frame))
+        }
+        return mappings
+    }
+    
+    /// 通过名称查找屏幕 frame
+    private func findScreenFrameByName(_ name: String, currentScreens: [(id: UInt32, name: String, frame: CGRect)]) -> CGRect? {
+        // 首先尝试精确匹配
+        if let exact = currentScreens.first(where: { $0.name == name }) {
+            return exact.frame
+        }
+        // 尝试部分匹配（名称可能包含分辨率等信息）
+        if let partial = currentScreens.first(where: { $0.name.contains(name) || name.contains($0.name) }) {
+            return partial.frame
+        }
+        // 尝试匹配名称的第一个词（通常是不带分辨率的显示器名称）
+        let nameFirstWord = name.components(separatedBy: " ").first ?? name
+        if let firstMatch = currentScreens.first(where: { $0.name.components(separatedBy: " ").first == nameFirstWord }) {
+            return firstMatch.frame
+        }
+        // 按索引匹配（如果只有一个屏幕，优先返回主屏幕）
+        if currentScreens.count == 1 {
+            return currentScreens.first?.frame
+        }
+        // 按屏幕顺序匹配（根据屏幕 x 坐标从左到右）
+        let sorted = currentScreens.sorted { $0.frame.origin.x < $1.frame.origin.x }
+        for (index, screen) in sorted.enumerated() {
+            // 检查名称是否包含序号
+            let nameIndex = "\(index + 1)"
+            if name.contains(nameIndex) {
+                return screen.frame
+            }
+        }
+        return nil
     }
     
     /// 检查窗口位置并处理
@@ -206,6 +268,54 @@ class WindowMover: ObservableObject {
             }
         }
         return nil
+    }
+    
+    /// 将应用窗口移动到指定屏幕（如果不在该屏幕）
+    private func moveAppWindowsToScreenIfNeeded(pid: pid_t, targetFrame: CGRect, appBundleID: String) {
+        let appElement = AXUIElementCreateApplication(pid)
+        
+        var windowsValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
+        
+        guard result == .success, let windows = windowsValue as? [AXUIElement] else {
+            return
+        }
+        
+        let windowID = "\(pid)-menuBarApp"
+        
+        // 如果窗口已经在目标屏幕附近，跳过
+        if let prev = previousWindowPositions[windowID] {
+            if abs(prev.x - targetFrame.origin.x) < 50 && abs(prev.y - targetFrame.origin.y) < 50 {
+                return
+            }
+        }
+        
+        for window in windows {
+            // 检查窗口当前位置
+            var positionValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+                  let posVal = positionValue else {
+                continue
+            }
+            
+            var axPosition = CGPoint.zero
+            AXValueGetValue(posVal as! AXValue, .cgPoint, &axPosition)
+            
+            // 检查窗口是否在目标屏幕内
+            if targetFrame.contains(axPosition) {
+                previousWindowPositions[windowID] = axPosition
+                continue
+            }
+            
+            // 窗口不在目标屏幕，移动它
+            movingWindows.insert(windowID)
+            moveWindowToFrame(window, targetFrame: targetFrame)
+            previousWindowPositions[windowID] = CGPoint(x: targetFrame.midX, y: targetFrame.midY)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                self?.movingWindows.remove(windowID)
+            }
+        }
     }
     
     func moveAppToScreen(bundleIdentifier: String, screenID: UInt32) {

@@ -17,6 +17,7 @@ struct SettingsView: View {
     
     @State private var launchAtLogin: Bool = false
     @State private var showHelpTips: Bool = true
+    @State private var popoverBackgroundOpacity: Double = 1.0
     
     // 快捷键相关状态
     @State private var setScreenModifiers: Set<ModifierKey> = [.command, .shift]
@@ -96,6 +97,20 @@ struct SettingsView: View {
                             .onChange(of: showHelpTips) { _, newValue in
                                 updateSetting { $0.showHelpTips = newValue }
                             }
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("弹窗背景透明度")
+                                Spacer()
+                                Text("\(Int(popoverBackgroundOpacity * 100))%")
+                                    .foregroundColor(.secondary)
+                            }
+                            Slider(value: $popoverBackgroundOpacity, in: 0.3...1.0, step: 0.1)
+                                .onChange(of: popoverBackgroundOpacity) { _, newValue in
+                                    updateSetting { $0.popoverBackgroundOpacity = newValue }
+                                }
+                        }
+                        .padding(.vertical, 4)
                     } header: {
                         Text("界面设置")
                     }
@@ -177,6 +192,7 @@ struct SettingsView: View {
         if let settings = appSettings.first {
             launchAtLogin = settings.launchAtLogin
             showHelpTips = settings.showHelpTips
+            popoverBackgroundOpacity = settings.popoverBackgroundOpacity
             
             // 加载快捷键设置
             setScreenKeyCode = UInt32(settings.setScreenKeyCode)

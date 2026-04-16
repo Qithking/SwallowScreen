@@ -97,11 +97,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover?.behavior = .transient
         popover?.animates = true
         
+        // 先设置一个后备视图，确保 popover 始终有 contentViewController
+        let fallbackView = Text("正在加载...")
+            .frame(width: 360, height: 400)
+        popover?.contentViewController = NSHostingController(rootView: fallbackView)
+        
+        // 延迟初始化实际内容，等待 modelContainer 准备好
+        DispatchQueue.main.async { [weak self] in
+            self?.initializePopoverContent()
+        }
+    }
+    
+    private func initializePopoverContent() {
+        print("[Popover] 开始初始化...")
+        
         guard let container = modelContainer else {
+            print("[Popover] modelContainer 为空，尝试重新创建...")
             // 尝试重新创建
-            setupModelContainer()
+            setupModelContainerWithDebug()
             guard let container = modelContainer else {
-                print("Failed to create ModelContainer for popover")
+                let message = "ModelContainer 创建失败，请查看控制台日志"
+                print("[Popover] \(message)")
+                showErrorView(message: message)
                 return
             }
             setupPopoverWithContainer(container)
@@ -111,11 +128,63 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupPopoverWithContainer(container)
     }
     
+    private func setupModelContainerWithDebug() {
+        let schema = Schema([AppInfo.self, AppSettings.self])
+        
+        let storeURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("SwallowScreen")
+        
+        print("[ModelContainer] 存储路径: \(storeURL.path)")
+        
+        do {
+            try FileManager.default.createDirectory(at: storeURL, withIntermediateDirectories: true)
+        } catch {
+            print("[ModelContainer] 创建目录失败: \(error)")
+        }
+        
+        let modelConfiguration = ModelConfiguration(
+            schema: schema,
+            url: storeURL.appendingPathComponent("SwallowScreen.store"),
+            allowsSave: true
+        )
+        
+        do {
+            modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            print("[ModelContainer] 创建成功!")
+        } catch {
+            print("[ModelContainer] 创建失败: \(error)")
+            print("[ModelContainer] 错误详情: \(type(of: error))")
+        }
+    }
+    
     private func setupPopoverWithContainer(_ container: ModelContainer) {
+        print("[Popover] 创建 AppPopoverView...")
         let contentView = AppPopoverView()
             .modelContainer(container)
         
         popover?.contentViewController = NSHostingController(rootView: contentView)
+        print("[Popover] 初始化完成!")
+    }
+    
+    private func showErrorView(message: String) {
+        let errorView = VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 40))
+                .foregroundColor(.orange)
+            Text("出错了")
+                .font(.headline)
+            Text(message)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            Button("重试") {
+                self.initializePopoverContent()
+            }
+        }
+        .padding(20)
+        .frame(width: 300, height: 200)
+        
+        popover?.contentViewController = NSHostingController(rootView: errorView)
     }
     
     private func setupScreenChangeObserver() {
@@ -185,8 +254,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             if AXIsProcessTrusted() {
-                self?.stopWindowMoverMonitoring()
-                self?.setupWindowMover()
+                Task { @MainActor [weak self] in
+                    self?.stopWindowMoverMonitoring()
+                    self?.setupWindowMover()
+                }
             }
         }
         permissionCheckTimer = timer
@@ -200,8 +271,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.unregisterHotKeys()
-            self?.registerHotKeys()
+            Task { @MainActor [weak self] in
+                self?.unregisterHotKeys()
+                self?.registerHotKeys()
+            }
         }
         
         // 注册快捷键
