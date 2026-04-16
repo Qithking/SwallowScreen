@@ -144,15 +144,42 @@ create_release() {
     current_version=$(get_current_version)
     echo_info "当前版本: $current_version"
     
-    echo ""
-    read -p "输入新版本号 (格式: 1.0.0): " new_version
+    # 获取 GitHub 提交次数
+    echo_info "获取 GitHub 提交记录..."
+    commit_count=$(gh api repos/Qithking/SwallowScreen/commits --jq '. | length' 2>/dev/null || echo "0")
+    if [ "$commit_count" = "0" ]; then
+        # 备用方案：获取总提交数
+        commit_count=$(gh api repos/Qithking/SwallowScreen/commits --paginate --jq 'length' 2>/dev/null || git rev-list --count HEAD 2>/dev/null || echo "0")
+    fi
+    echo_info "GitHub 提交次数: $commit_count"
     
-    # 验证版本格式并添加 v 前缀
-    if [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        new_version="v$new_version"
-    elif ! [[ "$new_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        echo_error "版本号格式错误，请使用 *.*.* 格式"
-        exit 1
+    # 生成推荐版本号（基于当前版本递增 patch 版本）
+    if [[ "$current_version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        major="${BASH_REMATCH[1]}"
+        minor="${BASH_REMATCH[2]}"
+        patch="${BASH_REMATCH[3]}"
+        recommended_version="v${major}.${minor}.$((patch + 1))"
+    else
+        # 默认从 1.0.0 开始
+        recommended_version="v1.0.1"
+    fi
+    
+    echo ""
+    echo_info "推荐版本号: $recommended_version"
+    echo ""
+    read -p "输入新版本号 (留空使用推荐版本号 $recommended_version): " new_version
+    
+    # 如果用户直接回车，使用推荐版本号
+    if [ -z "$new_version" ]; then
+        new_version="$recommended_version"
+    else
+        # 验证版本格式并添加 v 前缀
+        if [[ "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            new_version="v$new_version"
+        elif ! [[ "$new_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo_error "版本号格式错误，请使用 *.*.* 格式"
+            exit 1
+        fi
     fi
     
     echo_info "创建版本: $new_version"
@@ -337,71 +364,6 @@ delete_tag() {
     fi
 }
 
-# 手动触发 GitHub Actions
-trigger_actions() {
-    echo ""
-    echo "=== 手动触发 GitHub Actions ==="
-    echo ""
-    
-    if ! command -v gh &> /dev/null; then
-        echo_error "需要安装 GitHub CLI"
-        echo "安装命令: brew install gh"
-        exit 1
-    fi
-    
-    if ! gh auth status &> /dev/null; then
-        echo_error "未登录 GitHub"
-        echo "请运行: gh auth login"
-        exit 1
-    fi
-    
-    echo_info "获取最新的 Actions 运行..."
-    
-    # 列出最近的运行
-    echo ""
-    echo_info "最近的运行:"
-    gh run list --repo Qithking/SwallowScreen --limit 10 --json status,name,headBranch,conclusion 2>/dev/null | \
-        jq -r '.[] | "\(.status) | \(.name) | \(.headBranch) | \(.conclusion // "-")"' 2>/dev/null || \
-        gh run list --repo Qithking/SwallowScreen --limit 5
-    
-    echo ""
-    echo_info "可用 workflows:"
-    gh workflow list --repo Qithking/SwallowScreen
-    
-    echo ""
-    read -p "输入要触发的 workflow 名称 (留空使用 Release): " workflow_name
-    if [ -z "$workflow_name" ]; then
-        workflow_name="Release"
-    fi
-    
-    echo ""
-    read -p "输入分支名 (留空使用 main): " branch_name
-    if [ -z "$branch_name" ]; then
-        branch_name="main"
-    fi
-    
-    echo ""
-    echo_info "触发 workflow: $workflow_name (分支: $branch_name)"
-    read -p "确认触发? (y/n): " confirm
-    
-    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-        echo ""
-        run_info=$(gh workflow run "$workflow_name" --repo Qithking/SwallowScreen --ref "$branch_name" 2>&1)
-        if [ $? -eq 0 ]; then
-            echo_success "已触发 workflow!"
-            echo "$run_info"
-            run_id=$(echo "$run_info" | grep -oE 'https://github.com/[^/]+/[^/]+/actions/runs/[0-9]+' | tail -1)
-            if [ -n "$run_id" ]; then
-                echo_info "查看进度: $run_id"
-            fi
-        else
-            echo_error "触发失败: $run_info"
-        fi
-    else
-        echo_info "已取消"
-    fi
-}
-
 # 主菜单
 show_menu() {
     echo ""
@@ -413,7 +375,6 @@ show_menu() {
     echo "║  3. 下载最新版本 DMG                             ║"
     echo "║  4. 清除失败的 GitHub Actions                    ║"
     echo "║  5. 删除指定 Tag                                 ║"
-    echo "║  6. 手动触发 GitHub Actions                      ║"
     echo "║  0. 退出                                          ║"
     echo "╚══════════════════════════════════════════════════╝"
     echo ""
@@ -425,7 +386,7 @@ main() {
     
     while true; do
         show_menu
-        read -p "请选择操作 (0-6): " choice
+        read -p "请选择操作 (0-5): " choice
         
         case $choice in
             1)
@@ -443,15 +404,12 @@ main() {
             5)
                 delete_tag
                 ;;
-            6)
-                trigger_actions
-                ;;
             0)
                 echo_info "再见!"
                 exit 0
                 ;;
             *)
-                echo_error "无效选择，请输入 0-6"
+                echo_error "无效选择，请输入 0-5"
                 ;;
         esac
         
