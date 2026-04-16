@@ -33,9 +33,22 @@ jobs:
           # 构建 arm64 版本
           swift build --configuration release --arch arm64 2>&1
           
-          # 查找 arm64 二进制文件
-          ARM64_PATH=$(find .build -name "SwallowScreen" -type f -perm /u+x 2>/dev/null | head -1)
+          # 查找 arm64 二进制文件 - 检查整个构建目录
+          echo "=== .build directory structure ==="
+          find .build -type f -name "SwallowScreen*" 2>/dev/null | head -20
+          
+          ARM64_PATH=$(find .build -type f -name "SwallowScreen" 2>/dev/null | head -1)
+          if [ -z "$ARM64_PATH" ]; then
+            # 尝试不同的命名模式
+            ARM64_PATH=$(find .build -executable -name "*SwallowScreen*" 2>/dev/null | head -1)
+          fi
           echo "=== arm64 binary: $ARM64_PATH ==="
+          
+          if [ -z "$ARM64_PATH" ] || [ ! -f "$ARM64_PATH" ]; then
+            echo "Error: arm64 binary not found"
+            exit 1
+          fi
+          
           cp "$ARM64_PATH" .build/universal/SwallowScreen-arm64
           
           # 构建 x86_64 版本
@@ -43,8 +56,17 @@ jobs:
           swift build --configuration release --arch x86_64 2>&1
           
           # 查找 x86_64 二进制文件
-          X86_PATH=$(find .build -name "SwallowScreen" -type f -perm /u+x 2>/dev/null | head -1)
+          X86_PATH=$(find .build -type f -name "SwallowScreen" 2>/dev/null | head -1)
+          if [ -z "$X86_PATH" ]; then
+            X86_PATH=$(find .build -executable -name "*SwallowScreen*" 2>/dev/null | head -1)
+          fi
           echo "=== x86_64 binary: $X86_PATH ==="
+          
+          if [ -z "$X86_PATH" ] || [ ! -f "$X86_PATH" ]; then
+            echo "Error: x86_64 binary not found"
+            exit 1
+          fi
+          
           cp "$X86_PATH" .build/universal/SwallowScreen-x86_64
           
           # 合并为 Universal Binary
