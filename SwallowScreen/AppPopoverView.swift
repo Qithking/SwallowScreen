@@ -39,10 +39,8 @@ struct AppPopoverView: View {
     
     var body: some View {
         ZStack {
-            // 毛玻璃背景 - 直接从 appSettings 读取透明度
-            VisualEffectView(material: .popover, blendingMode: .behindWindow)
-                .opacity(appSettings.first?.popoverBackgroundOpacity ?? 1.0)
-                .ignoresSafeArea()
+            // 毛玻璃背景
+            backgroundView
             
             VStack(spacing: 0) {
                 // 首次使用提示
@@ -68,8 +66,10 @@ struct AppPopoverView: View {
             setupSettings()
             refreshScreens()
             checkWelcomeTip()
-            // 自动检查更新
-            autoCheckForUpdate()
+            // 根据设置决定是否检查更新
+            if appSettings.first?.checkUpdateOnLaunch ?? true {
+                autoCheckForUpdate()
+            }
         }
         .alert("发现新版本 v\(latestVersion)", isPresented: $showUpdateAlert) {
             Button("下载更新") {
@@ -88,6 +88,12 @@ struct AppPopoverView: View {
     
     @State private var showUpdateAlert: Bool = false
     @State private var showUpToDateAlert: Bool = false
+    
+    // MARK: - 背景视图
+    private var backgroundView: some View {
+        VisualEffectView(material: .popover, blendingMode: .behindWindow, state: .active)
+            .ignoresSafeArea()
+    }
     
     // MARK: - 欢迎提示视图
     private var welcomeTipView: some View {

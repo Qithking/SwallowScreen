@@ -62,7 +62,7 @@ struct GeneralSettingsView: View {
     
     @State private var launchAtLogin: Bool = false
     @State private var showHelpTips: Bool = true
-    @State private var popoverBackgroundOpacity: Double = 1.0
+    @State private var checkUpdateOnLaunch: Bool = true
     
     var body: some View {
         ScrollView {
@@ -102,21 +102,16 @@ struct GeneralSettingsView: View {
                     Divider()
                         .padding(.vertical, 8)
                     
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "circle.lefthalf.filled")
-                                .foregroundColor(.purple)
-                                .frame(width: 24)
-                            Text("弹窗背景透明度")
-                                .font(.body)
-                            Spacer()
-                            Text("\(Int(popoverBackgroundOpacity * 100))%")
-                                .foregroundColor(.secondary)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $popoverBackgroundOpacity, in: 0.3...1.0, step: 0.1)
-                            .onChange(of: popoverBackgroundOpacity) { _, newValue in
-                                updateSetting { $0.popoverBackgroundOpacity = newValue }
+                    SettingsRow(
+                        icon: "arrow.clockwise.circle.fill",
+                        iconColor: .green,
+                        title: "启动时检查更新",
+                        subtitle: "打开应用时自动检查新版本"
+                    ) {
+                        Toggle("", isOn: $checkUpdateOnLaunch)
+                            .labelsHidden()
+                            .onChange(of: checkUpdateOnLaunch) { _, newValue in
+                                updateSetting { $0.checkUpdateOnLaunch = newValue }
                             }
                     }
                 }
@@ -132,7 +127,7 @@ struct GeneralSettingsView: View {
         if let settings = appSettings.first {
             launchAtLogin = settings.launchAtLogin
             showHelpTips = settings.showHelpTips
-            popoverBackgroundOpacity = settings.popoverBackgroundOpacity
+            checkUpdateOnLaunch = settings.checkUpdateOnLaunch
         }
     }
     

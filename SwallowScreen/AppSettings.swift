@@ -20,8 +20,8 @@ final class AppSettings {
     // 是否显示帮助提示
     var showHelpTips: Bool
     
-    // 托盘弹出框背景透明度 (0.0 - 1.0)
-    var popoverBackgroundOpacity: Double
+    // 启动时是否检查更新
+    var checkUpdateOnLaunch: Bool
     
     // 设置屏幕快捷键 - 键码 (默认: 0x18 = 1键)
     var setScreenKeyCode: Int32
@@ -45,7 +45,7 @@ final class AppSettings {
         self.launchAtLogin = false
         self.showInMenuBar = true
         self.showHelpTips = true
-        self.popoverBackgroundOpacity = 1.0  // 默认不透明
+        self.checkUpdateOnLaunch = true  // 默认启动时检查更新
         self.setScreenKeyCode = 0x18  // 数字键1
         self.setScreenModifiers = UInt32(cmdKey | shiftKey)
         self.clearScreenKeyCode = 0x19 // 数字键2
