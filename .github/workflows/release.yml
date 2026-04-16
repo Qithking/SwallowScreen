@@ -70,21 +70,22 @@ jobs:
           # 创建 App Bundle 目录结构
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
-          mkdir -p SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset
           
           # 复制二进制文件
           cp build/SwallowScreen SwallowScreen.app/Contents/MacOS/
           chmod +x SwallowScreen.app/Contents/MacOS/SwallowScreen
           
-          # 复制资源文件
-          cp -r SwallowScreen/Assets.xcassets/* SwallowScreen.app/Contents/Resources/Assets.xcassets/
+          # 复制整个 Assets.xcassets 目录
+          cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
+          
+          # 复制 HelpView.html
           [ -f SwallowScreen/HelpView.html ] && cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
           
           # 获取版本号
           VERSION=${GITHUB_REF#refs/tags/v}
           
           # 创建 Info.plist
-          cat > SwallowScreen.app/Contents/Info.plist << EOF
+          cat > SwallowScreen.app/Contents/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -94,11 +95,11 @@ jobs:
               <key>CFBundleExecutable</key>
               <string>SwallowScreen</string>
               <key>CFBundleIconFile</key>
-              <string></string>
+              <string>AppIcon</string>
               <key>CFBundleIconName</key>
               <string>AppIcon</string>
               <key>CFBundleIdentifier</key>
-              <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+              <string>com.swallowscreen.app</string>
               <key>CFBundleInfoDictionaryVersion</key>
               <string>6.0</string>
               <key>CFBundleName</key>
@@ -106,7 +107,7 @@ jobs:
               <key>CFBundlePackageType</key>
               <string>APPL</string>
               <key>CFBundleShortVersionString</key>
-              <string>${VERSION}</string>
+              <string>VERSION_PLACEHOLDER</string>
               <key>CFBundleVersion</key>
               <string>1</string>
               <key>LSMinimumSystemVersion</key>
@@ -121,9 +122,13 @@ jobs:
           </plist>
           EOF
           
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" SwallowScreen.app/Contents/Info.plist
+          
           echo "=== App Bundle Structure ==="
           ls -la SwallowScreen.app/Contents/
-          ls -la SwallowScreen.app/Contents/MacOS/
+          ls -la SwallowScreen.app/Contents/Resources/
+          ls -la SwallowScreen.app/Contents/Resources/Assets.xcassets/
+          ls -la SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/
           
           echo "=== Code Signature ==="
           codesign -vvv SwallowScreen.app/Contents/MacOS/SwallowScreen 2>&1 || echo "Not signed"
@@ -144,14 +149,15 @@ jobs:
           mkdir -p dmg_temp
           cp -R SwallowScreen.app dmg_temp/
           
+          # 创建 DMG，使用 App 的图标
           create-dmg \
             --volname "SwallowScreen" \
             --window-pos 200 120 \
             --window-size 500 350 \
-            --icon-size 100 \
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
+            --volicon "dmg_temp/SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/256x256.png" \
             "SwallowScreen-${{ github.ref_name }}-universal.dmg" \
             "dmg_temp/"
 
