@@ -28,19 +28,24 @@ jobs:
 
       - name: Build Universal Binary
         run: |
+          mkdir -p .build/universal
+          
           # 构建 arm64 版本
           swift build --configuration release --arch arm64 2>&1
           
-          # 复制 arm64 二进制
-          mkdir -p .build/universal
-          cp $(swift build --configuration release --arch arm64 --show-build-path 2>/dev/null)/SwallowScreen .build/universal/SwallowScreen-arm64
+          # 查找 arm64 二进制文件
+          ARM64_PATH=$(find .build -name "SwallowScreen" -type f -perm /u+x 2>/dev/null | head -1)
+          echo "=== arm64 binary: $ARM64_PATH ==="
+          cp "$ARM64_PATH" .build/universal/SwallowScreen-arm64
           
           # 构建 x86_64 版本
           rm -rf .build
           swift build --configuration release --arch x86_64 2>&1
           
-          # 复制 x86_64 二进制
-          cp $(swift build --configuration release --arch x86_64 --show-build-path 2>/dev/null)/SwallowScreen .build/universal/SwallowScreen-x86_64
+          # 查找 x86_64 二进制文件
+          X86_PATH=$(find .build -name "SwallowScreen" -type f -perm /u+x 2>/dev/null | head -1)
+          echo "=== x86_64 binary: $X86_PATH ==="
+          cp "$X86_PATH" .build/universal/SwallowScreen-x86_64
           
           # 合并为 Universal Binary
           lipo -create .build/universal/SwallowScreen-arm64 .build/universal/SwallowScreen-x86_64 -output .build/universal/SwallowScreen
