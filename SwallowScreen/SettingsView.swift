@@ -131,27 +131,96 @@ struct SettingsView: View {
                     }
                     
                     Section {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("关于 SwallowScreen")
-                                .font(.headline)
-                            
-                            HStack {
-                                Text("当前版本: \(currentVersion)")
-                                if !latestVersion.isEmpty && latestVersion != currentVersion {
-                                    Text("(最新: \(latestVersion))")
-                                        .foregroundColor(.green)
+                        VStack(spacing: 16) {
+                            // 应用图标和名称
+                            HStack(spacing: 12) {
+                                if let appIcon = NSApplication.shared.icon {
+                                    Image(nsImage: appIcon)
+                                        .resizable()
+                                        .frame(width: 64, height: 64)
+                                        .cornerRadius(12)
                                 }
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("SwallowScreen")
+                                        .font(.title2)
+                                        .fontWeight(.semibold)
+                                    
+                                    HStack {
+                                        Text("版本 \(currentVersion)")
+                                            .foregroundColor(.secondary)
+                                        if !latestVersion.isEmpty && latestVersion != currentVersion {
+                                            Text("→ \(latestVersion)")
+                                                .foregroundColor(.green)
+                                                .fontWeight(.medium)
+                                        }
+                                    }
+                                    .font(.caption)
+                                }
+                                
+                                Spacer()
                             }
-                            .foregroundColor(.secondary)
                             
+                            Divider()
+                            
+                            // 简介
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("应用简介")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.secondary)
+                                Text("一款帮助你管理应用窗口在不同屏幕上显示的工具。支持固定应用到指定屏幕、多屏幕窗口管理、全局快捷键操作。")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            
+                            // 开发者信息
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("开发者")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.secondary)
+                                Text("Qithking")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            
+                            // GitHub 链接
+                            Button(action: openGitHub) {
+                                HStack {
+                                    Image(systemName: "link")
+                                    Text("GitHub 项目地址")
+                                    Spacer()
+                                    Image(systemName: "arrow.up.right.square")
+                                }
+                                .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.accentColor)
+                            
+                            // 许可证
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("开源协议")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.secondary)
+                                Text("MIT License")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            
+                            // 检查更新按钮
                             Button(action: checkForUpdate) {
                                 HStack {
                                     if isCheckingUpdate {
                                         ProgressView()
                                             .scaleEffect(0.7)
-                                            .padding(.trailing, 4)
                                     }
                                     Text(updateButtonText)
+                                        .frame(maxWidth: .infinity)
                                 }
                             }
                             .buttonStyle(.bordered)
@@ -159,15 +228,11 @@ struct SettingsView: View {
                             
                             if updateStatus == .available {
                                 Button(action: downloadUpdate) {
-                                    Label("下载更新", systemImage: "arrow.down.circle.fill")
+                                    Label("下载新版本", systemImage: "arrow.down.circle.fill")
+                                        .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.borderedProminent)
                             }
-                            
-                            Text("一款帮助你管理应用窗口在不同屏幕上显示的工具。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .padding(.top, 4)
                         }
                         .padding(.vertical, 8)
                     } header: {
@@ -178,7 +243,7 @@ struct SettingsView: View {
                 .scrollContentBackground(.hidden)
             }
         }
-        .frame(width: 400, height: 420)
+        .frame(width: 400, height: 520)
         .background(Color.white)
         .onAppear {
             loadSettings()
@@ -396,6 +461,12 @@ struct SettingsView: View {
     
     private func downloadUpdate() {
         if let url = URL(string: downloadURL) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+    
+    private func openGitHub() {
+        if let url = URL(string: "https://github.com/Qithking/SwallowScreen") {
             NSWorkspace.shared.open(url)
         }
     }
