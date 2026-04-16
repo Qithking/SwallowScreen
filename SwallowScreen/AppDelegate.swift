@@ -14,8 +14,7 @@ import WebKit
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
-    private var eventMonitor: Any?
+    private var appWindow: NSWindow?
     private var modelContainer: ModelContainer?
     private var windowMover: WindowMover?
     private var settingsWindow: NSWindow?
@@ -35,9 +34,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // 创建状态栏图标
         setupStatusItem()
-        
-        // 创建弹出窗口
-        setupPopover()
         
         // 监听屏幕变化
         setupScreenChangeObserver()
@@ -86,69 +82,63 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 button.title = "SS"
             }
             
-            button.action = #selector(togglePopover)
+            button.action = #selector(toggleAppWindow)
             button.target = self
         }
     }
     
-    private func setupPopover() {
-        popover = NSPopover()
-        popover?.contentSize = NSSize(width: 360, height: 400)
-        popover?.behavior = .transient
-        popover?.animates = true
-        
-        // 先设置一个后备视图，确保 popover 始终有 contentViewController
-        let fallbackView = Text("正在加载...")
-            .frame(width: 360, height: 400)
-        popover?.contentViewController = NSHostingController(rootView: fallbackView)
-        
-        // 延迟初始化实际内容，等待 modelContainer 准备好
-        DispatchQueue.main.async { [weak self] in
-            self?.initializePopoverContent()
-        }
-    }
-    
-    private func initializePopoverContent() {
+    private func initializeAppWindow() {
         guard let container = modelContainer else {
-            // 尝试重新创建
             setupModelContainer()
             guard let container = modelContainer else {
-                showErrorView(message: "ModelContainer 创建失败")
                 return
             }
-            setupPopoverWithContainer(container)
+            setupAppWindowWithContainer(container)
             return
         }
         
-        setupPopoverWithContainer(container)
+        setupAppWindowWithContainer(container)
     }
     
-    private func setupPopoverWithContainer(_ container: ModelContainer) {
+    private func setupAppWindowWithContainer(_ container: ModelContainer) {
         let contentView = AppPopoverView()
             .modelContainer(container)
         
-        popover?.contentViewController = NSHostingController(rootView: contentView)
+        let hostingController = NSHostingController(rootView: contentView)
+        
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = "SwallowScreen"
+        window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+        window.minSize = NSSize(width: 360, height: 300)
+        window.maxSize = NSSize(width: 360, height: 800)
+        window.setContentSize(NSSize(width: 360, height: 500))
+        window.level = .floating
+        window.isReleasedWhenClosed = false
+        
+        appWindow = window
     }
     
-    private func showErrorView(message: String) {
-        let errorView = VStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 40))
-                .foregroundColor(.orange)
-            Text("出错了")
-                .font(.headline)
-            Text(message)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-            Button("重试") {
-                self.initializePopoverContent()
+    @objc private func toggleAppWindow() {
+        if let window = appWindow {
+            if window.isVisible {
+                window.close()
+            } else {
+                if let button = statusItem?.button {
+                    let buttonRect = button.window?.convertToScreen(button.bounds) ?? .zero
+                    window.setFrameOrigin(NSPoint(x: buttonRect.midX - 180, y: buttonRect.minY - 510))
+                }
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
             }
+        } else {
+            initializeAppWindow()
+            if let button = statusItem?.button {
+                let buttonRect = button.window?.convertToScreen(button.bounds) ?? .zero
+                appWindow?.setFrameOrigin(NSPoint(x: buttonRect.midX - 180, y: buttonRect.minY - 510))
+            }
+            appWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         }
-        .padding(20)
-        .frame(width: 300, height: 200)
-        
-        popover?.contentViewController = NSHostingController(rootView: errorView)
     }
     
     private func setupScreenChangeObserver() {
@@ -376,8 +366,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - 设置窗口
     @objc private func openSettingsWindow() {
-        // 关闭 popover
-        closePopover()
+        // 关闭 appWindow
+        appWindow?.close()
         
         // 如果窗口已存在，先关闭再重新创建以确保居中
         if settingsWindow != nil {
@@ -425,8 +415,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     // MARK: - 帮助窗口
     @objc private func openHelpWindow() {
-        // 关闭 popover
-        closePopover()
+        // 关闭 appWindow
+        appWindow?.close()
         
         // 如果窗口已存在，关闭并重新创建
         if helpWindow != nil {
@@ -471,38 +461,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     
-    @objc private func togglePopover() {
-        if let popover = popover {
-            if popover.isShown {
-                closePopover()
-            } else {
-                showPopover()
-            }
-        }
-    }
-    
-    private func showPopover() {
-        if let button = statusItem?.button {
-            popover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            
-            eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-                if self?.popover?.isShown == true {
-                    self?.closePopover()
-                }
-            }
-        }
-    }
-    
-    private func closePopover() {
-        popover?.performClose(nil)
-        if let eventMonitor = eventMonitor {
-            NSEvent.removeMonitor(eventMonitor)
-            self.eventMonitor = nil
-        }
-    }
-    
     @objc private func screenConfigurationChanged() {
-        print("Screen configuration changed")
+        // 屏幕配置变化时的处理
     }
     
     func applicationWillTerminate(_ notification: Notification) {

@@ -1,6 +1,6 @@
 # SwallowScreen
 
-基于 Ai 生成一款 macOS Menu Bar 应用，帮助你管理应用窗口在不同屏幕上的显示位置。
+一款 macOS Menu Bar 应用，帮助你管理应用窗口在不同屏幕上的显示位置。
 
 [![macOS](https://img.shields.io/badge/macOS-13.0%2B-blue)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-5.9-orange)](https://swift.org/)

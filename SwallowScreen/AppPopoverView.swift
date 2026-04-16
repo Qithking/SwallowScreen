@@ -23,6 +23,20 @@ struct AppPopoverView: View {
     @State private var settings: AppSettings?
     @State private var showWelcomeTip: Bool = false
     
+    // 检查更新相关状态
+    @State private var isCheckingUpdate: Bool = false
+    @State private var updateStatus: UpdateStatus = .idle
+    @State private var latestVersion: String = ""
+    @State private var downloadURL: String = ""
+    
+    enum UpdateStatus {
+        case idle
+        case checking
+        case available
+        case upToDate
+        case error
+    }
+    
     var body: some View {
         ZStack {
             // 毛玻璃背景 - 直接从 appSettings 读取透明度
@@ -49,13 +63,31 @@ struct AppPopoverView: View {
                 toolbarArea
             }
         }
-        .frame(width: 360, height: 400)
+        .frame(width: 360, height: 500)
         .onAppear {
             setupSettings()
             refreshScreens()
             checkWelcomeTip()
+            // 自动检查更新
+            autoCheckForUpdate()
+        }
+        .alert("发现新版本 v\(latestVersion)", isPresented: $showUpdateAlert) {
+            Button("下载更新") {
+                openDownloadWindow()
+            }
+            Button("稍后", role: .cancel) {}
+        } message: {
+            Text("是否要下载并安装新版本？")
+        }
+        .alert("已是最新版本", isPresented: $showUpToDateAlert) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text("当前版本已是最新，无需更新。")
         }
     }
+    
+    @State private var showUpdateAlert: Bool = false
+    @State private var showUpToDateAlert: Bool = false
     
     // MARK: - 欢迎提示视图
     private var welcomeTipView: some View {
@@ -172,7 +204,8 @@ struct AppPopoverView: View {
     
     // MARK: - 工具栏区域
     private var toolbarArea: some View {
-        HStack(spacing: 16) {
+        HStack {
+            // 左侧：设置按钮
             Button(action: {
                 openSettingsWindow()
             }) {
@@ -186,16 +219,23 @@ struct AppPopoverView: View {
             
             Spacer()
             
+            // 右侧：检查更新和退出按钮
             Button(action: {
-                openHelp()
+                checkForUpdate()
             }) {
                 HStack(spacing: 4) {
-                    Image(systemName: "questionmark.circle")
-                    Text("帮助")
+                    if isCheckingUpdate {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                    } else {
+                        Image(systemName: updateStatus == .available ? "arrow.down.circle.fill" : "arrow.clockwise")
+                    }
+                    Text(updateButtonText)
                 }
             }
             .buttonStyle(.plain)
-            .foregroundColor(.primary)
+            .foregroundColor(updateStatus == .available ? .green : .primary)
+            .disabled(isCheckingUpdate)
             
             Button(action: {
                 NSApplication.shared.terminate(nil)
@@ -208,7 +248,8 @@ struct AppPopoverView: View {
             .buttonStyle(.plain)
             .foregroundColor(.red)
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
     
     // MARK: - 辅助方法
@@ -303,6 +344,112 @@ struct AppPopoverView: View {
     
     private func openHelp() {
         NotificationCenter.default.post(name: .openHelpWindow, object: nil)
+    }
+    
+    private var updateButtonText: String {
+        switch updateStatus {
+        case .idle, .error:
+            return "检查更新"
+        case .checking:
+            return "检查中..."
+        case .available:
+            return "发现新版本"
+        case .upToDate:
+            return "已是最新"
+        }
+    }
+    
+    // 自动检查更新（启动时调用）
+    private func autoCheckForUpdate() {
+        guard let url = URL(string: "https://api.github.com/repos/Qithking/SwallowScreen/releases/latest") else {
+            return
+        }
+        
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        
+        URLSession.shared.dataTask(with: request) { [self] data, _, error in
+            guard let data = data, error == nil else { return }
+            
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let tagName = json["tag_name"] as? String {
+                let newVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                
+                if newVersion != currentVersion {
+                    DispatchQueue.main.async {
+                        self.latestVersion = newVersion
+                        if let assets = json["assets"] as? [[String: Any]],
+                           let firstAsset = assets.first,
+                           let downloadUrl = firstAsset["browser_download_url"] as? String {
+                            self.downloadURL = downloadUrl
+                            self.showUpdateAlert = true
+                        }
+                    }
+                }
+            }
+        }.resume()
+    }
+    
+    // 手动检查更新（按钮调用）
+    private func checkForUpdate() {
+        isCheckingUpdate = true
+        updateStatus = .checking
+        
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        
+        guard let url = URL(string: "https://api.github.com/repos/Qithking/SwallowScreen/releases/latest") else {
+            updateStatus = .error
+            isCheckingUpdate = false
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        
+        URLSession.shared.dataTask(with: request) { [self] data, response, error in
+            DispatchQueue.main.async {
+                self.isCheckingUpdate = false
+                
+                guard let data = data, error == nil else {
+                    self.updateStatus = .error
+                    return
+                }
+                
+                do {
+                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let tagName = json["tag_name"] as? String {
+                        self.latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                        
+                        if self.latestVersion == currentVersion {
+                            self.updateStatus = .upToDate
+                            self.showUpToDateAlert = true
+                        } else {
+                            self.updateStatus = .available
+                            if let assets = json["assets"] as? [[String: Any]],
+                               let firstAsset = assets.first,
+                               let browserDownloadURL = firstAsset["browser_download_url"] as? String {
+                                self.downloadURL = browserDownloadURL
+                                self.showUpdateAlert = true
+                            }
+                        }
+                    } else {
+                        self.updateStatus = .error
+                    }
+                } catch {
+                    self.updateStatus = .error
+                }
+            }
+        }.resume()
+    }
+    
+    private func openDownloadWindow() {
+        guard let url = URL(string: downloadURL) else { return }
+        let controller = DownloadWindowController(version: latestVersion, downloadURL: url)
+        controller.showWindow()
     }
 }
 
