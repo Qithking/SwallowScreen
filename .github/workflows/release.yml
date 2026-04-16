@@ -70,13 +70,14 @@ jobs:
           # 创建 App Bundle 目录结构
           mkdir -p SwallowScreen.app/Contents/MacOS
           mkdir -p SwallowScreen.app/Contents/Resources
+          mkdir -p SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset
           
           # 复制二进制文件
           cp build/SwallowScreen SwallowScreen.app/Contents/MacOS/
           chmod +x SwallowScreen.app/Contents/MacOS/SwallowScreen
           
-          # 复制整个 Assets.xcassets 目录
-          cp -r SwallowScreen/Assets.xcassets SwallowScreen.app/Contents/Resources/
+          # 复制 Assets.xcassets 目录结构
+          cp -r SwallowScreen/Assets.xcassets/* SwallowScreen.app/Contents/Resources/Assets.xcassets/
           
           # 复制 HelpView.html
           [ -f SwallowScreen/HelpView.html ] && cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
@@ -95,8 +96,6 @@ jobs:
               <key>CFBundleExecutable</key>
               <string>SwallowScreen</string>
               <key>CFBundleIconFile</key>
-              <string>AppIcon</string>
-              <key>CFBundleIconName</key>
               <string>AppIcon</string>
               <key>CFBundleIdentifier</key>
               <string>com.swallowscreen.app</string>
@@ -130,8 +129,9 @@ jobs:
           ls -la SwallowScreen.app/Contents/Resources/Assets.xcassets/
           ls -la SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/
           
-          echo "=== Code Signature ==="
-          codesign -vvv SwallowScreen.app/Contents/MacOS/SwallowScreen 2>&1 || echo "Not signed"
+          # 检查图标文件
+          echo "=== Icon Files ==="
+          find SwallowScreen.app -name "*.png" -o -name "*.icns" 2>/dev/null
 
       - name: Ad-hoc Sign App
         run: |
@@ -149,7 +149,15 @@ jobs:
           mkdir -p dmg_temp
           cp -R SwallowScreen.app dmg_temp/
           
-          # 创建 DMG，使用 App 的图标
+          # 获取应用图标路径
+          ICON_PATH="dmg_temp/SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/256x256@2x.png"
+          if [ ! -f "$ICON_PATH" ]; then
+            ICON_PATH="dmg_temp/SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/256x256.png"
+          fi
+          
+          echo "=== Using icon: $ICON_PATH ==="
+          
+          # 创建 DMG，使用 App 的图标 (create-dmg 支持 PNG)
           create-dmg \
             --volname "SwallowScreen" \
             --window-pos 200 120 \
@@ -157,7 +165,7 @@ jobs:
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
-            --volicon "dmg_temp/SwallowScreen.app/Contents/Resources/Assets.xcassets/AppIcon.appiconset/256x256.png" \
+            --volicon "$ICON_PATH" \
             "SwallowScreen-${{ github.ref_name }}-universal.dmg" \
             "dmg_temp/"
 
