@@ -2,7 +2,7 @@
 //  SettingsView.swift
 //  SwallowScreen
 //
-//  设置窗口视图 - 包含应用基础设置
+//  设置窗口视图 - 简洁整齐的现代设计
 //
 
 import SwiftUI
@@ -15,27 +15,43 @@ struct SettingsView: View {
     @State private var selectedTab: Int = 0
     
     var body: some View {
-        TabView(selection: $selectedTab) {
-            GeneralSettingsView()
-                .tabItem {
-                    Label("通用", systemImage: "gear")
-                }
-                .tag(0)
+        VStack(spacing: 0) {
+            // 应用图标
+            if let appIcon = NSImage(named: NSImage.applicationIconName) {
+                Image(nsImage: appIcon)
+                    .resizable()
+                    .frame(width: 72, height: 72)
+                    .padding(.top, 12)
+                    .padding(.bottom, 4)
+            } else {
+                Image("AppIcon")
+                    .resizable()
+                    .frame(width: 72, height: 72)
+                    .padding(.top, 12)
+                    .padding(.bottom, 4)
+            }            
             
-            HotkeySettingsView()
-                .tabItem {
-                    Label("快捷键", systemImage: "keyboard")
-                }
-                .tag(1)
-            
-            AboutView()
-                .tabItem {
-                    Label("关于", systemImage: "info.circle")
-                }
-                .tag(2)
+            TabView(selection: $selectedTab) {
+                GeneralSettingsView()
+                    .tabItem {
+                        Label("通用", systemImage: "gearshape.fill")
+                    }
+                    .tag(0)
+                
+                HotkeySettingsView()
+                    .tabItem {
+                        Label("快捷键", systemImage: "keyboard.fill")
+                    }
+                    .tag(1)
+                
+                AboutView()
+                    .tabItem {
+                        Label("关于", systemImage: "info.circle.fill")
+                    }
+                    .tag(2)
+            }
         }
-        .frame(width: 500, height: 400)
-        .background(Color.white)
+        .frame(width: 480, height: 450)
     }
 }
 
@@ -49,42 +65,64 @@ struct GeneralSettingsView: View {
     @State private var popoverBackgroundOpacity: Double = 1.0
     
     var body: some View {
-        Form {
-            Section {
-                Toggle("开机启动", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, newValue in
-                        updateSetting { $0.launchAtLogin = newValue }
-                        setLaunchAtLogin(enabled: newValue)
+        ScrollView {
+            VStack(spacing: 16) {
+                // 基础设置卡片
+                SettingsCard(title: "基础设置") {
+                    SettingsRow(
+                        icon: "power.circle.fill",
+                        iconColor: .blue,
+                        title: "开机启动",
+                        subtitle: "登录时自动启动应用"
+                    ) {
+                        Toggle("", isOn: $launchAtLogin)
+                            .labelsHidden()
+                            .onChange(of: launchAtLogin) { _, newValue in
+                                updateSetting { $0.launchAtLogin = newValue }
+                                setLaunchAtLogin(enabled: newValue)
+                            }
                     }
-            } header: {
-                Text("基础设置")
-            }
-            
-            Section {
-                Toggle("显示帮助提示", isOn: $showHelpTips)
-                    .onChange(of: showHelpTips) { _, newValue in
-                        updateSetting { $0.showHelpTips = newValue }
-                    }
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("弹窗背景透明度")
-                        Spacer()
-                        Text("\(Int(popoverBackgroundOpacity * 100))%")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $popoverBackgroundOpacity, in: 0.3...1.0, step: 0.1)
-                        .onChange(of: popoverBackgroundOpacity) { _, newValue in
-                            updateSetting { $0.popoverBackgroundOpacity = newValue }
-                        }
                 }
-                .padding(.vertical, 4)
-            } header: {
-                Text("界面设置")
+                
+                // 界面设置卡片
+                SettingsCard(title: "界面设置") {
+                    SettingsRow(
+                        icon: "questionmark.circle.fill",
+                        iconColor: .orange,
+                        title: "显示帮助提示",
+                        subtitle: "在界面上显示操作提示"
+                    ) {
+                        Toggle("", isOn: $showHelpTips)
+                            .labelsHidden()
+                            .onChange(of: showHelpTips) { _, newValue in
+                                updateSetting { $0.showHelpTips = newValue }
+                            }
+                    }
+                    
+                    Divider()
+                        .padding(.vertical, 8)
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Image(systemName: "circle.lefthalf.filled")
+                                .foregroundColor(.purple)
+                                .frame(width: 24)
+                            Text("弹窗背景透明度")
+                                .font(.body)
+                            Spacer()
+                            Text("\(Int(popoverBackgroundOpacity * 100))%")
+                                .foregroundColor(.secondary)
+                                .monospacedDigit()
+                        }
+                        Slider(value: $popoverBackgroundOpacity, in: 0.3...1.0, step: 0.1)
+                            .onChange(of: popoverBackgroundOpacity) { _, newValue in
+                                updateSetting { $0.popoverBackgroundOpacity = newValue }
+                            }
+                    }
+                }
             }
+            .padding(20)
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
         .onAppear {
             loadSettings()
         }
@@ -150,40 +188,44 @@ struct HotkeySettingsView: View {
     }
     
     var body: some View {
-        Form {
-            Section {
-                VStack(alignment: .leading, spacing: 16) {
-                    HotkeyRecorderView(
-                        title: "设置前台应用屏幕",
-                        modifiers: $setScreenModifiers,
-                        keyCode: $setScreenKeyCode,
-                        isRecording: recordingHotkey == .setScreen,
-                        onStartRecording: { recordingHotkey = .setScreen }
-                    )
-                    .onChange(of: setScreenModifiers) { _, _ in saveHotkey(.setScreen) }
-                    .onChange(of: setScreenKeyCode) { _, _ in saveHotkey(.setScreen) }
-                    
-                    HotkeyRecorderView(
-                        title: "取消前台应用屏幕设置",
-                        modifiers: $clearScreenModifiers,
-                        keyCode: $clearScreenKeyCode,
-                        isRecording: recordingHotkey == .clearScreen,
-                        onStartRecording: { recordingHotkey = .clearScreen }
-                    )
-                    .onChange(of: clearScreenModifiers) { _, _ in saveHotkey(.clearScreen) }
-                    .onChange(of: clearScreenKeyCode) { _, _ in saveHotkey(.clearScreen) }
+        ScrollView {
+            VStack(spacing: 16) {
+                // 快捷键说明
+                HStack {
+                    Image(systemName: "keyboard")
+                        .foregroundColor(.secondary)
+                    Text("点击快捷键区域重新录制")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
                 }
-                .padding(.vertical, 8)
-            } header: {
-                Text("快捷键设置")
-            } footer: {
-                Text("点击快捷键区域录制新快捷键")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                
+                // 设置前台应用屏幕
+                HotkeyCard(
+                    title: "设置前台应用屏幕",
+                    subtitle: "将当前应用固定到指定屏幕",
+                    modifiers: $setScreenModifiers,
+                    keyCode: $setScreenKeyCode,
+                    isRecording: recordingHotkey == .setScreen,
+                    onStartRecording: { recordingHotkey = .setScreen }
+                )
+                .onChange(of: setScreenModifiers) { _, _ in saveHotkey(.setScreen) }
+                .onChange(of: setScreenKeyCode) { _, _ in saveHotkey(.setScreen) }
+                
+                // 取消前台应用屏幕设置
+                HotkeyCard(
+                    title: "取消屏幕设置",
+                    subtitle: "取消当前应用的屏幕固定",
+                    modifiers: $clearScreenModifiers,
+                    keyCode: $clearScreenKeyCode,
+                    isRecording: recordingHotkey == .clearScreen,
+                    onStartRecording: { recordingHotkey = .clearScreen }
+                )
+                .onChange(of: clearScreenModifiers) { _, _ in saveHotkey(.clearScreen) }
+                .onChange(of: clearScreenKeyCode) { _, _ in saveHotkey(.clearScreen) }
             }
+            .padding(20)
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
         .onAppear {
             loadSettings()
         }
@@ -309,129 +351,66 @@ struct AboutView: View {
     }
     
     var body: some View {
-        ScrollView {
-            VStack(spacing: 20) {
-                // 应用图标和名称
-                HStack(spacing: 16) {
-                    if let appIcon = NSImage(named: NSImage.applicationIconName) {
-                        Image(nsImage: appIcon)
-                            .resizable()
-                            .frame(width: 80, height: 80)
-                            .cornerRadius(16)
-                    } else {
-                        Image("AppIcon")
-                            .resizable()
-                            .frame(width: 80, height: 80)
-                            .cornerRadius(16)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("SwallowScreen")
-                            .font(.title)
-                            .fontWeight(.bold)
-                        
-                        HStack {
-                            Text("版本 \(currentVersion)")
-                                .foregroundColor(.secondary)
-                            if !latestVersion.isEmpty && latestVersion != currentVersion {
-                                Text("→ \(latestVersion)")
-                                    .foregroundColor(.green)
-                                    .fontWeight(.medium)
-                            }
+        VStack(spacing: 16) {            
+            
+            // 应用名称和版本
+            VStack(spacing: 4) {
+                Text("SwallowScreen")
+                    .font(.headline)
+                
+                Text("版本 \(currentVersion)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            // 按钮
+            VStack(spacing: 10) {
+                LinkButton(title: "反馈问题", icon: "envelope", action: feedback)
+                LinkButton(title: "GitHub 项目", icon: "link", action: openGitHub)
+                
+                Button(action: checkForUpdate) {
+                    HStack(spacing: 6) {
+                        if isCheckingUpdate {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Image(systemName: updateStatus == .available ? "arrow.down.circle.fill" : "arrow.clockwise")
                         }
-                        .font(.subheadline)
+                        Text(updateButtonText)
                     }
-                    
-                    Spacer()
-                }
-                .padding(.horizontal)
-                .padding(.top)
-                
-                Divider()
-                    .padding(.horizontal)
-                
-                // 应用简介
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("应用简介")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                    Text("一款帮助你管理应用窗口在不同屏幕上显示的工具。支持固定应用到指定屏幕、多屏幕窗口管理、全局快捷键操作。")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal)
-                
-                // 开发者信息
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("开发者")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                    Text("Qithking")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal)
-                
-                // GitHub 链接
-                Button(action: openGitHub) {
-                    HStack {
-                        Image(systemName: "link")
-                        Text("GitHub 项目地址")
-                        Spacer()
-                        Image(systemName: "arrow.up.right.square")
-                    }
-                    .font(.subheadline)
+                    .frame(maxWidth: 200)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(.accentColor)
-                .padding(.horizontal)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 16)
+                .background(Color.accentColor.opacity(0.1))
+                .cornerRadius(6)
+                .disabled(isCheckingUpdate)
                 
-                // 许可证
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("开源协议")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.secondary)
-                    Text("GNU General Public License v3.0 (GPLv3)")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal)
-                
-                Spacer(minLength: 20)
-                
-                // 检查更新按钮
-                VStack(spacing: 12) {
-                    Button(action: checkForUpdate) {
-                        HStack {
-                            if isCheckingUpdate {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                            }
-                            Text(updateButtonText)
-                                .frame(maxWidth: .infinity)
+                if updateStatus == .available {
+                    Button(action: openDownloadWindow) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.down.circle.fill")
+                            Text("下载 v\(latestVersion)")
                         }
+                        .frame(maxWidth: 200)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(isCheckingUpdate)
-                    
-                    if updateStatus == .available {
-                        Button(action: downloadUpdate) {
-                            Label("下载新版本", systemImage: "arrow.down.circle.fill")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 16)
+                    .background(Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(6)
                 }
-                .padding(.horizontal)
-                .padding(.bottom)
             }
+            
+            // 版权
+            Text("© 2026 Qithking. GPLv3.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.top, 8)
         }
+        .padding(.vertical, 16)
         .onAppear {
             loadCurrentVersion()
             checkForUpdate()
@@ -440,16 +419,14 @@ struct AboutView: View {
     
     private var updateButtonText: String {
         switch updateStatus {
-        case .idle:
+        case .idle, .error:
             return "检查更新"
         case .checking:
             return "检查中..."
         case .available:
-            return "发现新版本!"
+            return "发现新版本"
         case .upToDate:
             return "已是最新版本"
-        case .error:
-            return "检查更新"
         }
     }
     
@@ -509,10 +486,10 @@ struct AboutView: View {
         }.resume()
     }
     
-    private func downloadUpdate() {
-        if let url = URL(string: downloadURL) {
-            NSWorkspace.shared.open(url)
-        }
+    private func openDownloadWindow() {
+        guard let url = URL(string: downloadURL) else { return }
+        let controller = DownloadWindowController(version: latestVersion, downloadURL: url)
+        controller.showWindow()
     }
     
     private func openGitHub() {
@@ -520,22 +497,188 @@ struct AboutView: View {
             NSWorkspace.shared.open(url)
         }
     }
+    
+    private func feedback() {
+        if let url = URL(string: "https://github.com/Qithking/SwallowScreen/issues") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 }
 
-// MARK: - 快捷键录制视图
-struct HotkeyRecorderView: View {
+// MARK: - 下载进度视图
+struct DownloadProgressView: View {
+    let progress: Double
+    let error: String?
+    let onCancel: () -> Void
+    let onRetry: () -> Void
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            if let error = error {
+                // 错误状态
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 40))
+                    .foregroundColor(.orange)
+                
+                Text("下载失败")
+                    .font(.headline)
+                
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                
+                HStack(spacing: 12) {
+                    Button("取消") {
+                        onCancel()
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    
+                    Button("重试") {
+                        onRetry()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            } else {
+                // 下载中状态
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 40))
+                    .foregroundColor(.accentColor)
+                
+                Text("正在下载更新")
+                    .font(.headline)
+                
+                VStack(spacing: 8) {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .frame(width: 200)
+                    
+                    Text("\(Int(progress * 100))%")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .monospacedDigit()
+                }
+                
+                Button("取消") {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(30)
+        .frame(width: 280)
+    }
+}
+
+// MARK: - 链接按钮
+struct LinkButton: View {
     let title: String
+    let icon: String
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                Text(title)
+            }
+            .frame(maxWidth: 200)
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 16)
+        .background(Color.secondary.opacity(0.1))
+        .cornerRadius(6)
+    }
+}
+
+// MARK: - 设置卡片组件
+struct SettingsCard<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+                .foregroundColor(.primary)
+            
+            content()
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+    }
+}
+
+// MARK: - 设置行组件
+struct SettingsRow<ToggleContent: View>: View {
+    let icon: String
+    let iconColor: Color
+    let title: String
+    let subtitle: String?
+    @ViewBuilder let toggle: () -> ToggleContent
+    
+    init(
+        icon: String,
+        iconColor: Color = .accentColor,
+        title: String,
+        subtitle: String? = nil,
+        @ViewBuilder toggle: @escaping () -> ToggleContent
+    ) {
+        self.icon = icon
+        self.iconColor = iconColor
+        self.title = title
+        self.subtitle = subtitle
+        self.toggle = toggle
+    }
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .foregroundColor(iconColor)
+                .frame(width: 24)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.body)
+                if let subtitle = subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Spacer()
+            
+            toggle()
+        }
+    }
+}
+
+// MARK: - 快捷键卡片组件
+struct HotkeyCard: View {
+    let title: String
+    let subtitle: String
     @Binding var modifiers: Set<HotkeySettingsView.ModifierKey>
     @Binding var keyCode: UInt32
     let isRecording: Bool
     let onStartRecording: () -> Void
     
     var body: some View {
-        HStack {
+        VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Button(action: {
-                    onStartRecording()
-                }) {
+                Text(title)
+                    .font(.headline)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            
+            HStack {
+                Button(action: onStartRecording) {
                     HStack(spacing: 4) {
                         if isRecording {
                             Text("按下快捷键...")
@@ -547,23 +690,30 @@ struct HotkeyRecorderView: View {
                             Text(keyCodeToString(keyCode))
                         }
                     }
-                    .font(.system(size: 12, weight: .medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                     .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(isRecording ? Color.red.opacity(0.15) : Color.secondary.opacity(0.2))
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(isRecording ? Color.red.opacity(0.15) : Color.secondary.opacity(0.12))
                     )
                 }
                 .buttonStyle(.plain)
                 
-                Text(title)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                if !isRecording {
+                    Text("点击重新录制")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
             }
-            
-            Spacer()
         }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
     }
     
     private func keyCodeToString(_ keyCode: UInt32) -> String {
@@ -574,16 +724,11 @@ struct HotkeyRecorderView: View {
             0x17: "5", 0x18: "=", 0x19: "9", 0x1A: "7", 0x1B: "-", 0x1C: "8", 0x1D: "0",
             0x1E: "]", 0x1F: "O", 0x20: "U", 0x21: "[", 0x22: "I", 0x23: "P", 0x25: "L",
             0x26: "J", 0x27: "'", 0x28: "K", 0x29: ";", 0x2A: "\\", 0x2B: ",", 0x2C: "/",
-            0x2D: "N", 0x2E: "M", 0x2F: ".", 0x31: " ", 0x32: "`",
-            0x24: "↩", 0x30: "⇥", 0x33: "⌫", 0x35: "⎋",
+            0x2D: "N", 0x2E: "M", 0x2F: ".", 0x31: "Space", 0x32: "`",
+            0x24: "Enter", 0x30: "Tab", 0x33: "Delete", 0x35: "Esc",
             0x7A: "F1", 0x78: "F2", 0x63: "F3", 0x76: "F4", 0x60: "F5", 0x61: "F6",
             0x62: "F7", 0x64: "F8", 0x65: "F9", 0x6D: "F10", 0x67: "F11", 0x6F: "F12"
         ]
-        
-        if keyCode >= 0x12 && keyCode <= 0x1D {
-            let charValue = UInt8(keyCode - 0x12 + 49)
-            return String(UnicodeScalar(charValue))
-        }
         
         return keyMap[keyCode] ?? "?"
     }

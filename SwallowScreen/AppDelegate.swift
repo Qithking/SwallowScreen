@@ -410,7 +410,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: hostingController)
         window.title = "SwallowScreen 设置"
         window.styleMask = [.titled, .closable]
-        window.level = .floating
         window.isReleasedWhenClosed = false
         window.delegate = self
         
