@@ -33,15 +33,8 @@ jobs:
           # 构建 arm64 版本
           swift build --configuration release --arch arm64 2>&1
           
-          # 查找 arm64 二进制文件 - 检查整个构建目录
-          echo "=== .build directory structure ==="
-          find .build -type f -name "SwallowScreen*" 2>/dev/null | head -20
-          
-          ARM64_PATH=$(find .build -type f -name "SwallowScreen" 2>/dev/null | head -1)
-          if [ -z "$ARM64_PATH" ]; then
-            # 尝试不同的命名模式
-            ARM64_PATH=$(find .build -executable -name "*SwallowScreen*" 2>/dev/null | head -1)
-          fi
+          # 查找 arm64 二进制文件 (排除 dSYM)
+          ARM64_PATH=$(find .build -type f -name "SwallowScreen" -not -path "*.dSYM/*" 2>/dev/null | head -1)
           echo "=== arm64 binary: $ARM64_PATH ==="
           
           if [ -z "$ARM64_PATH" ] || [ ! -f "$ARM64_PATH" ]; then
@@ -55,11 +48,8 @@ jobs:
           rm -rf .build
           swift build --configuration release --arch x86_64 2>&1
           
-          # 查找 x86_64 二进制文件
-          X86_PATH=$(find .build -type f -name "SwallowScreen" 2>/dev/null | head -1)
-          if [ -z "$X86_PATH" ]; then
-            X86_PATH=$(find .build -executable -name "*SwallowScreen*" 2>/dev/null | head -1)
-          fi
+          # 查找 x86_64 二进制文件 (排除 dSYM)
+          X86_PATH=$(find .build -type f -name "SwallowScreen" -not -path "*.dSYM/*" 2>/dev/null | head -1)
           echo "=== x86_64 binary: $X86_PATH ==="
           
           if [ -z "$X86_PATH" ] || [ ! -f "$X86_PATH" ]; then
