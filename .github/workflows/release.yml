@@ -109,7 +109,7 @@ jobs:
             --icon "SwallowScreen.app" 150 175 \
             --app-drop-link 350 175 \
             --hide-extension "SwallowScreen.app" \
-            "SwallowScreen-${{ github.ref.name }}.dmg" \
+            "SwallowScreen-${{ github.ref_name }}.dmg" \
             "dmg_temp/"
 
       - name: Upload to Release
