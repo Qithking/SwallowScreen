@@ -66,7 +66,11 @@ jobs:
 
       - name: Generate Xcode Project
         run: |
-          swift package generate-xcodeproj --output-path SwallowScreen.xcodeproj 2>&1
+          # 如果没有 xcodeproj，使用 xcodegen 生成
+          if [ ! -f "SwallowScreen.xcodeproj/project.pbxproj" ]; then
+            brew install xcodegen
+            xcodegen generate
+          fi
           ls -la SwallowScreen.xcodeproj/
 
       - name: Build arm64
