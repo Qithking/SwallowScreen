@@ -1,167 +1,270 @@
 #!/bin/bash
+
 set -e
-cd "$(dirname "$0")"
 
-# Config
-APP_NAME="SwallowScreen"
-VERSION=$(grep -A1 CFBundleShortVersionString SwallowScreen/Info.plist | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/')
-TAG="v${VERSION}"
-GITHUB_REPO="Qithking/SwallowScreen"
-GITEE_REPO=""
-STAGE="/tmp/${APP_NAME,,}-release-${VERSION}"
+# 配置
+REPO_URL=$(git remote get-url origin 2>/dev/null | sed 's/.git$//' || echo "")
+REPO_NAME=$(basename "$REPO_URL" 2>/dev/null || echo "SwallowScreen")
 
-echo "=== ${APP_NAME} Release ${TAG} ==="
-echo ""
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-# Check if tag already exists on remote
-if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
-    echo "Error: tag ${TAG} already exists. Bump version in SwallowScreen/Info.plist first."
-    exit 1
-fi
+echo_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
 
-# Detect architecture
-ARCH=$(uname -m)
-echo "Current architecture: $ARCH"
+echo_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
 
-# Clean old builds
-echo "[1/6] Cleaning old builds..."
-rm -rf .build
-rm -rf "$STAGE"
+echo_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-# Build for Apple Silicon
-echo "[2/6] Building Apple Silicon (arm64)..."
-swift build -c release --arch arm64
-ARM64_BIN=$(find .build -name "${APP_NAME}" -type f -executable 2>/dev/null | head -1)
-if [ -z "$ARM64_BIN" ]; then
-    echo "Error: Apple Silicon binary not found"
-    exit 1
-fi
-echo "  Built: $ARM64_BIN"
+echo_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
 
-# Build for Intel
-echo "[3/6] Building Intel (x86_64)..."
-swift build -c release --arch x86_64
-X86_BIN=$(find .build -name "${APP_NAME}" -type f -executable 2>/dev/null | head -1)
-if [ -z "$X86_BIN" ]; then
-    echo "Error: Intel binary not found"
-    exit 1
-fi
-echo "  Built: $X86_BIN"
-
-# Package app bundles
-echo "[4/6] Packaging apps..."
-
-for label in Apple-Silicon Intel; do
-    if [ "$label" = "Apple-Silicon" ]; then
-        BIN="$ARM64_BIN"
-    else
-        BIN="$X86_BIN"
+# 检查 Git 状态
+check_git_status() {
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo_error "当前目录不是 Git 仓库"
+        exit 1
     fi
-    APP_DIR="${STAGE}/${label}/${APP_NAME}.app/Contents"
-    mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
-    cp "$BIN" "$APP_DIR/MacOS/"
-    cp "SwallowScreen/Info.plist" "$APP_DIR/"
-    cp -r "SwallowScreen/Assets.xcassets" "$APP_DIR/Resources/"
-    cp "SwallowScreen/HelpView.html" "$APP_DIR/Resources/"
-    echo "  Packaged ${label}"
-done
+}
 
-# Create DMGs
-echo "[5/6] Creating DMGs..."
-for label in Apple-Silicon Intel; do
-    DMG_NAME="${APP_NAME}-${TAG}-${label}.dmg"
-    DMG_DIR="${STAGE}/dmg-${label}"
-    mkdir -p "$DMG_DIR"
-    cp -R "${STAGE}/${label}/${APP_NAME}.app" "$DMG_DIR/"
-    ln -s /Applications "$DMG_DIR/Applications"
-    hdiutil create -volname "${APP_NAME}" -srcfolder "$DMG_DIR" -ov -format UDZO \
-        "${STAGE}/${DMG_NAME}" -quiet
-    echo "  Created ${DMG_NAME}"
-done
+# 获取最新版本号
+get_latest_release() {
+    curl -s "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null | \
+        grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || echo ""
+}
 
-# Git commit, tag, push
-echo "[6/6] Pushing tag and publishing release..."
-git add -A
-git diff --cached --quiet || git commit -m "${TAG}"
-git tag "$TAG" 2>/dev/null || true
-git push origin main --tags
-if [ -n "$GITEE_REPO" ]; then
-    git push gitee main --tags 2>/dev/null || echo "  Warning: failed to push to Gitee remote"
-fi
+# 获取当前 git 版本
+get_current_version() {
+    git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"
+}
 
-# Upload to GitHub release
-echo "Publishing release to GitHub..."
-RELEASE_NOTES="## ${APP_NAME} ${TAG}
-
-多屏幕窗口管理工具
-
-### 系统要求
-- macOS 13.0+
-
-### 支持架构
-- Apple Silicon (M1/M2/M3...)
-- Intel Mac
-
-### 功能
-- 固定屏幕：指定应用只能在特定屏幕移动
-- 多屏幕支持：为每个应用指定首选显示屏幕
-- 全局快捷键：快速设置前台应用的屏幕
-- 菜单栏应用：不占用 Dock 空间
-
-### 下载
-- **Apple Silicon (M1/M2/M3/M4)**: \`${APP_NAME}-${TAG}-Apple-Silicon.dmg\`
-- **Intel**: \`${APP_NAME}-${TAG}-Intel.dmg\`
-
-### 安装方式
-打开 \`.dmg\` 文件，将 ${APP_NAME} 拖入 Applications 文件夹。
-首次打开请前往 **系统设置 → 隐私与安全性** 点击"仍要打开"。"
-
-gh release create "$TAG" \
-    --repo "$GITHUB_REPO" \
-    --title "${APP_NAME} ${TAG}" \
-    --notes "$RELEASE_NOTES" \
-    "${STAGE}/${APP_NAME}-${TAG}-Apple-Silicon.dmg" \
-    "${STAGE}/${APP_NAME}-${TAG}-Intel.dmg"
-
-echo "  GitHub release done"
-
-# Upload to Gitee if configured
-if [ -n "$GITEE_REPO" ] && [ -n "$GITEE_TOKEN" ]; then
-    echo "Publishing release to Gitee..."
-    GITEE_RELEASE_RESP=$(curl -s -X POST \
-        "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: token ${GITEE_TOKEN}" \
-        -d "{
-            \"tag_name\": \"${TAG}\",
-            \"name\": \"${APP_NAME} ${TAG}\",
-            \"body\": \"${RELEASE_NOTES}\",
-            \"target_commitish\": \"main\"
-        }")
-
-    GITEE_RELEASE_ID=$(echo "$GITEE_RELEASE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
-
-    if [ -n "$GITEE_RELEASE_ID" ] && [ "$GITEE_RELEASE_ID" != "None" ]; then
-        for label in Apple-Silicon Intel; do
-            DMG_FILE="${STAGE}/${APP_NAME}-${TAG}-${label}.dmg"
-            curl -s -X POST \
-                "https://gitee.com/api/v5/repos/${GITEE_REPO}/releases/${GITEE_RELEASE_ID}/attach_files" \
-                -H "Authorization: token ${GITEE_TOKEN}" \
-                -F "file=@${DMG_FILE}" > /dev/null
-            echo "  Uploaded ${APP_NAME}-${TAG}-${label}.dmg to Gitee"
-        done
-        echo "  Gitee release done"
-    else
-        echo "  Warning: Failed to create Gitee release"
+# 提交并推送代码
+push_to_github() {
+    echo ""
+    echo "=== 提交代码到 GitHub ==="
+    echo ""
+    
+    # 检查远程仓库
+    if ! git remote -v | grep -q origin; then
+        echo_error "未找到 origin 远程仓库"
+        exit 1
     fi
-fi
+    
+    # 检查分支
+    current_branch=$(git branch --show-current)
+    if [ "$current_branch" != "main" ]; then
+        echo_warning "当前不在 main 分支 (当前: $current_branch)"
+        read -p "是否切换到 main 分支? (y/n): " confirm
+        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+            git checkout main
+        else
+            echo_info "继续在当前分支操作"
+        fi
+    fi
+    
+    # 显示更改
+    echo ""
+    echo_info "当前更改:"
+    git status --short
+    
+    echo ""
+    if git diff-index --quiet HEAD -- 2>/dev/null; then
+        echo_info "没有需要提交的更改"
+    else
+        echo ""
+        read -p "输入提交信息 (留空使用默认): " commit_msg
+        if [ -z "$commit_msg" ]; then
+            commit_msg="Update: $(date '+%Y-%m-%d %H:%M:%S')"
+        fi
+        
+        echo ""
+        echo_info "执行: git add . && git commit -m '$commit_msg'"
+        git add .
+        git commit -m "$commit_msg"
+        
+        echo ""
+        echo_info "推送到 origin/main..."
+        git push origin main
+        
+        echo_success "代码已成功推送到 GitHub!"
+    fi
+}
 
-echo ""
-echo "=== Done! Released ${TAG} ==="
-echo "GitHub: https://github.com/${GITHUB_REPO}/releases/tag/${TAG}"
-if [ -n "$GITEE_REPO" ]; then
-    echo "Gitee:  https://gitee.com/${GITEE_REPO}/releases/tag/${TAG}"
-fi
+# 发布版本
+create_release() {
+    echo ""
+    echo "=== 创建新版本 ==="
+    echo ""
+    
+    # 检查 GitHub CLI
+    if ! command -v gh &> /dev/null; then
+        echo_error "需要安装 GitHub CLI"
+        echo "安装命令: brew install gh"
+        exit 1
+    fi
+    
+    # 检查登录状态
+    if ! gh auth status &> /dev/null; then
+        echo_error "未登录 GitHub"
+        echo "请运行: gh auth login"
+        exit 1
+    fi
+    
+    # 获取当前版本
+    current_version=$(get_current_version)
+    echo_info "当前版本: $current_version"
+    
+    echo ""
+    read -p "输入新版本号 (格式: v1.0.0): " new_version
+    
+    # 验证版本格式
+    if ! [[ "$new_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo_error "版本号格式错误，请使用 v*.*.* 格式"
+        exit 1
+    fi
+    
+    # 检查版本是否已存在
+    if git tag | grep -q "^${new_version}$"; then
+        echo_error "版本 $new_version 已存在"
+        exit 1
+    fi
+    
+    echo ""
+    echo_info "创建 tag: $new_version"
+    git tag "$new_version"
+    
+    echo ""
+    echo_info "推送 tag 到 GitHub..."
+    git push origin "$new_version"
+    
+    echo_success "已创建版本 $new_version 并推送!"
+    echo ""
+    echo_info "GitHub Actions 将自动开始构建 DMG..."
+    echo_info "查看构建进度: https://github.com/${REPO_NAME}/actions"
+}
 
-# Cleanup
-rm -rf "$STAGE"
+# 下载最新版本
+download_latest() {
+    echo ""
+    echo "=== 下载最新版本 ==="
+    echo ""
+    
+    # 获取最新版本信息
+    echo_info "正在获取最新版本信息..."
+    
+    # 检查 GitHub CLI
+    if command -v gh &> /dev/null && gh auth status &> /dev/null; then
+        latest_info=$(gh release view --json tagName,url 2>/dev/null || echo "")
+        latest_version=$(echo "$latest_info" | grep -o '"tagName"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
+    fi
+    
+    # 备用方案: 使用 API
+    if [ -z "$latest_version" ]; then
+        latest_version=$(curl -s "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null | \
+            grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' || echo "")
+    fi
+    
+    if [ -z "$latest_version" ]; then
+        echo_error "无法获取最新版本，请检查仓库地址"
+        exit 1
+    fi
+    
+    echo_info "最新版本: $latest_version"
+    
+    # 下载 DMG
+    dmg_name="SwallowScreen-${latest_version}-universal.dmg"
+    download_url=""
+    
+    # 尝试从 GitHub Release 获取下载链接
+    if command -v gh &> /dev/null && gh auth status &> /dev/null; then
+        download_url=$(gh release view "$latest_version" --json assets -q '.assets[] | select(.name | contains("dmg")) | .url' 2>/dev/null || echo "")
+    fi
+    
+    # 构建直接下载链接
+    if [ -z "$download_url" ]; then
+        download_url="https://github.com/${REPO_NAME}/releases/download/${latest_version}/${dmg_name}"
+    fi
+    
+    echo ""
+    echo_info "下载链接: $download_url"
+    
+    # 下载文件
+    echo ""
+    read -p "是否下载? (y/n): " confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        cd ~/Downloads
+        echo_info "开始下载..."
+        
+        if command -v curl &> /dev/null; then
+            curl -L -o "$dmg_name" "$download_url" 2>&1
+        elif command -v wget &> /dev/null; then
+            wget -O "$dmg_name" "$download_url"
+        fi
+        
+        if [ -f "$dmg_name" ]; then
+            echo_success "下载完成: ~/Downloads/$dmg_name"
+            echo_info "文件大小: $(ls -lh "$dmg_name" | awk '{print $5}')"
+        else
+            echo_error "下载失败"
+            exit 1
+        fi
+    fi
+}
+
+# 主菜单
+show_menu() {
+    echo ""
+    echo "╔══════════════════════════════════════════════════╗"
+    echo "║          SwallowScreen 发布工具 v1.0              ║"
+    echo "╠══════════════════════════════════════════════════╣"
+    echo "║  1. 提交代码到 GitHub (main 分支)                 ║"
+    echo "║  2. 发布新版本 (创建 tag 触发 GitHub Actions)     ║"
+    echo "║  3. 下载最新版本 DMG                             ║"
+    echo "║  0. 退出                                          ║"
+    echo "╚══════════════════════════════════════════════════╝"
+    echo ""
+}
+
+# 主程序
+main() {
+    check_git_status
+    
+    while true; do
+        show_menu
+        read -p "请选择操作 (0-3): " choice
+        
+        case $choice in
+            1)
+                push_to_github
+                ;;
+            2)
+                create_release
+                ;;
+            3)
+                download_latest
+                ;;
+            0)
+                echo_info "再见!"
+                exit 0
+                ;;
+            *)
+                echo_error "无效选择，请输入 0-3"
+                ;;
+        esac
+        
+        echo ""
+        read -p "按 Enter 继续..." dummy
+    done
+}
+
+main
