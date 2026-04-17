@@ -149,8 +149,9 @@ jobs:
 
       - name: Ad-hoc Sign App
         run: |
-          # 使用 ad-hoc 签名
-          codesign --force --deep --sign - SwallowScreen.app
+          # 使用 ad-hoc 签名，并指定固定标识符
+          # 注意：macOS 辅助功能权限仍可能因代码变化需要重新授权
+          codesign --force --deep --sign "SwallowScreen" SwallowScreen.app
           
           echo "=== Verify Signature ==="
           codesign -vvv SwallowScreen.app
@@ -201,7 +202,7 @@ jobs:
             echo "  1. 下载并打开 DMG 文件"
             echo "  2. 将 SwallowScreen.app 拖入 Applications 文件夹"
             echo "  3. 如果提示"无法打开"，请在系统设置 > 隐私与安全性中允许运行"
-            echo "  4. 首次运行时需要在系统设置中授权辅助功能权限"
+            echo "  4. 如果辅助功能失效，请在系统设置 > 隐私与安全性 > 辅助功能 中重新添加此应用"
           } > release_body.txt
           
           cat release_body.txt

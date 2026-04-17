@@ -488,11 +488,15 @@ class WindowMover: ObservableObject {
     }
     
     func checkAccessibilityPermission() -> Bool {
+        // 先检查是否已有权限（不显示提示）
         hasAccessibilityPermission = AXIsProcessTrusted()
         return hasAccessibilityPermission
     }
     
     func requestAccessibilityPermission() {
+        // 注意：macOS 的辅助功能权限基于代码签名。
+        // 如果应用签名变化（如版本更新后使用不同签名），权限会失效，需要重新授权。
+        // GitHub Action 发布的应用使用临时签名，每次发布签名可能不同。
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true]
         AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
