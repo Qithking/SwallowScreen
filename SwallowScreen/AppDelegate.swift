@@ -429,10 +429,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     
-    @objc private func screenConfigurationChanged() {
-        // 屏幕配置变化时的处理
-    }
-    
     func applicationWillTerminate(_ notification: Notification) {
         // 停止权限检查定时器
         permissionCheckTimer?.invalidate()

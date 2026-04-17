@@ -9,12 +9,6 @@ import Foundation
 import SwiftData
 import Carbon.HIToolbox
 
-// 数据版本标识，用于迁移
-enum DataVersion: String, Codable {
-    case v1 = "1.0"
-    case current = "2.0"
-}
-
 @Model
 final class AppSettings {
     // 是否开机启动

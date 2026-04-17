@@ -28,7 +28,6 @@ struct ScreenInfo: Identifiable, Hashable {
 @MainActor
 class ScreenManager: ObservableObject {
     @Published var screens: [ScreenInfo] = []
-    @Published var defaultScreen: ScreenInfo?
     
     init() {
         refreshScreens()
@@ -96,17 +95,9 @@ class ScreenManager: ObservableObject {
                 serialNumber: serialNumber
             )
             screenList.append(info)
-            
-            if isMain {
-                self.defaultScreen = info
-            }
         }
         
         self.screens = screenList
-    }
-    
-    func getScreen(by id: UInt32) -> ScreenInfo? {
-        return screens.first { $0.id == id }
     }
     
     func getScreenContaining(point: CGPoint) -> ScreenInfo? {

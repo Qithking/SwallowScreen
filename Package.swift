@@ -22,8 +22,7 @@ let package = Package(
             path: "SwallowScreen",
             exclude: ["Assets.xcassets"],
             resources: [
-                .process("Assets.xcassets"),
-                .process("HelpView.html")
+                .process("Assets.xcassets")
             ]
         )
     ]

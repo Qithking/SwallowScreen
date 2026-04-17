@@ -7,7 +7,6 @@
 
 import Foundation
 import AppKit
-import SwiftUI
 import Combine
 
 struct SystemApp: Identifiable, Hashable {
@@ -129,9 +128,5 @@ class AppManager: ObservableObject {
             return pngData
         }
         return nil
-    }
-    
-    func getRunningAppInfo() -> NSRunningApplication? {
-        return NSWorkspace.shared.frontmostApplication
     }
 }
