@@ -54,10 +54,34 @@ class WindowMover: ObservableObject {
         guard let appInfo = try? modelContext.fetch(descriptor).first else { return }
         
         // 如果设置了目标屏幕且没有启用固定屏幕
-        if let targetScreenID = appInfo.targetScreenID, !appInfo.pinToScreen {
-            guard let targetFrame = getScreenFrame(for: targetScreenID) else { return }
+        if appInfo.targetScreenID != nil || appInfo.targetScreenSerialNumber != nil {
+            // 获取当前屏幕信息
+            let currentScreens = getCurrentScreenMappings()
+            
+            // 尝试多种方式匹配屏幕
+            var targetFrame: CGRect? = nil
+            
+            // 1. 首先尝试通过序列号匹配（最可靠）
+            if let serialNumber = appInfo.targetScreenSerialNumber {
+                if let matchedScreen = findScreenBySerialNumber(serialNumber, currentScreens: currentScreens) {
+                    targetFrame = matchedScreen.frame
+                }
+            }
+            
+            // 2. 如果序列号匹配失败，尝试通过原始 ID 匹配
+            if targetFrame == nil, let screenID = appInfo.targetScreenID {
+                targetFrame = getScreenFrame(for: screenID)
+            }
+            
+            // 3. 如果 ID 匹配失败，尝试通过名称匹配
+            if targetFrame == nil, let screenName = appInfo.targetScreenName {
+                targetFrame = findScreenFrameByName(screenName, currentScreens: currentScreens)
+            }
+            
+            guard let finalTargetFrame = targetFrame else { return }
+            
             // 轮询等待窗口创建并立即移动
-            pollForWindows(pid: pid, targetFrame: targetFrame)
+            pollForWindows(pid: pid, targetFrame: finalTargetFrame)
         }
     }
     
@@ -154,18 +178,33 @@ class WindowMover: ObservableObject {
                 // 只有启用状态才处理
                 guard appInfo.isEnabled else { continue }
                 
-                // 尝试通过原始 ID 或名称匹配找到当前屏幕
+                // 尝试通过多种方式匹配屏幕
                 var targetScreenFrame: CGRect? = nil
                 var targetScreenID: UInt32? = nil
                 
-                if let screenID = appInfo.targetScreenID {
+                // 1. 首先尝试通过序列号匹配（最可靠）
+                if let serialNumber = appInfo.targetScreenSerialNumber {
+                    if let matchedScreen = findScreenBySerialNumber(serialNumber, currentScreens: currentScreens) {
+                        targetScreenFrame = matchedScreen.frame
+                        targetScreenID = matchedScreen.id
+                    }
+                }
+                
+                // 2. 如果序列号匹配失败，尝试通过原始 ID 匹配
+                if targetScreenFrame == nil, let screenID = appInfo.targetScreenID {
                     targetScreenID = screenID
                     targetScreenFrame = getScreenFrame(for: screenID)
                 }
                 
-                // 如果原始 ID 找不到，尝试通过名称匹配
+                // 3. 如果 ID 匹配失败，尝试通过名称匹配
                 if targetScreenFrame == nil, let screenName = appInfo.targetScreenName {
                     targetScreenFrame = findScreenFrameByName(screenName, currentScreens: currentScreens)
+                    // 名称匹配时，尝试找到对应的 ID
+                    if let frame = targetScreenFrame {
+                        if let matched = currentScreens.first(where: { $0.frame == frame }) {
+                            targetScreenID = matched.id
+                        }
+                    }
                 }
                 
                 guard let finalTargetFrame = targetScreenFrame,
@@ -190,20 +229,64 @@ class WindowMover: ObservableObject {
         }
     }
     
+    /// 屏幕信息结构
+    private struct ScreenInfo {
+        let id: UInt32
+        let name: String
+        let frame: CGRect
+        let serialNumber: String?
+    }
+    
     /// 获取当前屏幕映射
-    private func getCurrentScreenMappings() -> [(id: UInt32, name: String, frame: CGRect)] {
-        var mappings: [(id: UInt32, name: String, frame: CGRect)] = []
+    private func getCurrentScreenMappings() -> [ScreenInfo] {
+        var mappings: [ScreenInfo] = []
         for screen in NSScreen.screens {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
             let name = screen.localizedName
             let frame = screen.frame
-            mappings.append((id: screenID, name: name, frame: frame))
+            let serialNumber = getScreenSerialNumber(for: screen)
+            mappings.append(ScreenInfo(id: screenID, name: name, frame: frame, serialNumber: serialNumber))
         }
         return mappings
     }
     
+    /// 获取屏幕序列号 - 与 AppDelegate 保持一致的格式
+    private func getScreenSerialNumber(for screen: NSScreen) -> String? {
+        guard let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
+              screenID != 0 else {
+            return nil
+        }
+        
+        // 获取屏幕序列号
+        let serialNumber = CGDisplaySerialNumber(screenID)
+        
+        // 如果有有效序列号，优先使用
+        if serialNumber != 0 {
+            return "SN:\(serialNumber)"
+        }
+        
+        // 否则使用 vendor + model 组合
+        let vendorID = CGDisplayVendorNumber(screenID)
+        let modelID = CGDisplayModelNumber(screenID)
+        
+        if vendorID != 0 {
+            return "VM:\(vendorID)-\(modelID)"
+        }
+        
+        // 最后使用 displayID 作为标识
+        return "ID:\(screenID)"
+    }
+    
+    /// 通过序列号查找屏幕
+    private func findScreenBySerialNumber(_ serialNumber: String?, currentScreens: [ScreenInfo]) -> ScreenInfo? {
+        guard let serial = serialNumber, !serial.isEmpty else { return nil }
+        
+        // 只进行精确匹配，避免错误匹配
+        return currentScreens.first(where: { $0.serialNumber == serial })
+    }
+    
     /// 通过名称查找屏幕 frame
-    private func findScreenFrameByName(_ name: String, currentScreens: [(id: UInt32, name: String, frame: CGRect)]) -> CGRect? {
+    private func findScreenFrameByName(_ name: String, currentScreens: [ScreenInfo]) -> CGRect? {
         // 首先尝试精确匹配
         if let exact = currentScreens.first(where: { $0.name == name }) {
             return exact.frame
@@ -347,7 +430,19 @@ class WindowMover: ObservableObject {
         return nil
     }
     
-    func moveAppToScreen(bundleIdentifier: String, screenID: UInt32) {
+    func moveAppToScreen(bundleIdentifier: String, screenID: UInt32, screenSerialNumber: String?) {
+        // 首先尝试通过序列号找到屏幕
+        if let serial = screenSerialNumber {
+            if let matchedScreen = findScreenBySerialNumber(serial, currentScreens: getCurrentScreenMappings()) {
+                if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
+                    let pid = app.processIdentifier
+                    moveAppWindowsToScreen(pid: pid, targetFrame: matchedScreen.frame)
+                }
+                return
+            }
+        }
+        
+        // 备用：通过 ID 找屏幕
         guard let screenFrame = getScreenFrame(for: screenID) else { return }
         
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {

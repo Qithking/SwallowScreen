@@ -305,6 +305,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let screen = targetScreen else { return }
         
         let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+        let screenSerialNumber = getScreenSerialNumber(for: screen)
         
         // 保存配置
         if let container = modelContainer {
@@ -312,19 +313,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let descriptor = FetchDescriptor<AppInfo>(predicate: #Predicate { $0.bundleIdentifier == bundleID })
             
             if let existing = try? context.fetch(descriptor).first {
-                existing.updateScreen(screenID: screenID, screenName: screen.localizedName)
+                existing.updateScreen(screenID: screenID, screenName: screen.localizedName, screenSerialNumber: screenSerialNumber)
             } else {
                 let newInfo = AppInfo(
                     bundleIdentifier: bundleID,
                     appName: frontApp.localizedName ?? bundleID,
                     targetScreenID: screenID,
-                    targetScreenName: screen.localizedName
+                    targetScreenName: screen.localizedName,
+                    targetScreenSerialNumber: screenSerialNumber
                 )
                 context.insert(newInfo)
             }
             
+            // 确保数据被保存
+            try? context.save()
+            
             // 移动窗口到目标屏幕
-            windowMover?.moveAppToScreen(bundleIdentifier: bundleID, screenID: screenID)
+            windowMover?.moveAppToScreen(bundleIdentifier: bundleID, screenID: screenID, screenSerialNumber: screenSerialNumber)
         }
     }
     
@@ -337,10 +342,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let descriptor = FetchDescriptor<AppInfo>(predicate: #Predicate { $0.bundleIdentifier == bundleID })
             
             if let existing = try? context.fetch(descriptor).first {
-                existing.updateScreen(screenID: nil, screenName: nil)
+                existing.updateScreen(screenID: nil, screenName: nil, screenSerialNumber: nil)
                 existing.isEnabled = false
+                
+                // 确保数据被保存
+                try? context.save()
             }
         }
+    }
+    
+    /// 获取屏幕序列号
+    /// 使用序列号 > vendor-model 组合作为屏幕唯一标识
+    private func getScreenSerialNumber(for screen: NSScreen) -> String? {
+        guard let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
+              screenID != 0 else {
+            return nil
+        }
+        
+        // 获取屏幕序列号
+        let serialNumber = CGDisplaySerialNumber(screenID)
+        
+        // 如果有有效序列号，优先使用
+        if serialNumber != 0 {
+            return "SN:\(serialNumber)"
+        }
+        
+        // 否则使用 vendor + model 组合（显示器通常有这两个 ID）
+        let vendorID = CGDisplayVendorNumber(screenID)
+        let modelID = CGDisplayModelNumber(screenID)
+        
+        // vendor 为 0 表示无法识别该显示器
+        if vendorID != 0 {
+            return "VM:\(vendorID)-\(modelID)"
+        }
+        
+        // 最后使用 displayID 作为标识（这是最不稳定的，但聊胜于无）
+        return "ID:\(screenID)"
     }
     
     // MARK: - 设置窗口

@@ -279,12 +279,18 @@ struct AppPopoverView: View {
     
     private func getSelectedScreen(for app: SystemApp) -> ScreenInfo? {
         if let appInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-            // 优先通过 ID 匹配
+            // 1. 优先通过序列号匹配（最可靠）
+            if let serialNumber = appInfo.targetScreenSerialNumber {
+                if let screen = screenManager.screens.first(where: { $0.serialNumber == serialNumber }) {
+                    return screen
+                }
+            }
+            // 2. 通过 ID 匹配
             if let screenID = appInfo.targetScreenID,
                let screen = screenManager.screens.first(where: { $0.id == screenID }) {
                 return screen
             }
-            // ID 匹配失败，尝试通过名称匹配（解决重启后屏幕 ID 变化问题）
+            // 3. 通过名称匹配（解决重启后屏幕 ID 变化问题）
             if let screenName = appInfo.targetScreenName {
                 return screenManager.screens.first { screen in
                     screen.displayName == screenName || 
@@ -298,17 +304,25 @@ struct AppPopoverView: View {
     
     private func configureApp(app: SystemApp, screen: ScreenInfo?) {
         if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-            existingInfo.updateScreen(screenID: screen?.id, screenName: screen?.displayName)
+            existingInfo.updateScreen(
+                screenID: screen?.id,
+                screenName: screen?.displayName,
+                screenSerialNumber: screen?.serialNumber
+            )
         } else {
             let newInfo = AppInfo(
                 bundleIdentifier: app.bundleIdentifier,
                 appName: app.name,
                 iconData: appManager.getIconData(for: app),
                 targetScreenID: screen?.id,
-                targetScreenName: screen?.displayName
+                targetScreenName: screen?.displayName,
+                targetScreenSerialNumber: screen?.serialNumber
             )
             modelContext.insert(newInfo)
         }
+        
+        // 确保数据被保存
+        try? modelContext.save()
     }
     
     private func getIsPinToScreen(for app: SystemApp) -> Bool {
@@ -330,6 +344,9 @@ struct AppPopoverView: View {
             )
             modelContext.insert(newInfo)
         }
+        
+        // 确保数据被保存
+        try? modelContext.save()
         
         // 启用固定屏幕时，立即触发检查
         if pinned {
@@ -521,10 +538,6 @@ struct AppRowView: View {
                     } label: {
                         HStack {
                             Text(screen.displayName)
-                            if screen.isMain {
-                                Text("(主屏幕)")
-                                    .foregroundColor(.secondary)
-                            }
                             Spacer()
                             if selectedScreen?.id == screen.id {
                                 Image(systemName: "checkmark")
@@ -534,10 +547,17 @@ struct AppRowView: View {
                 }
             } label: {
                 HStack(spacing: 4) {
-                    Text(selectedScreen?.displayName ?? "不指定")
-                        .font(.caption)
-                        .foregroundColor(selectedScreen != nil ? .primary : .secondary)
-                        .lineLimit(1)
+                    if let screen = selectedScreen {
+                        Text(screen.displayName)
+                            .font(.caption)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                    } else {
+                        Text("不指定")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
