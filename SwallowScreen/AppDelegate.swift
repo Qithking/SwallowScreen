@@ -136,6 +136,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
     
+    @objc private func screenConfigurationChanged() {
+        // 屏幕配置变化时触发窗口位置检查
+        Task { @MainActor in
+            windowMover?.triggerImmediateCheck()
+        }
+    }
+    
     private func setupSettingsWindowObserver() {
         NotificationCenter.default.addObserver(
             self,
