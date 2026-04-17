@@ -61,9 +61,6 @@ class ScreenManager: ObservableObject {
     func refreshScreens() {
         var screenList: [ScreenInfo] = []
         
-        // 使用 CGDisplayIsMain 获取系统主屏幕（比 NSScreen.main 更可靠）
-        let mainDisplayID = CGMainDisplayID()
-        
         // 使用 NSScreen 获取屏幕信息（更可靠）
         for (index, screen) in NSScreen.screens.enumerated() {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? CGDirectDisplayID(index)
