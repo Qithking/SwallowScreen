@@ -189,7 +189,7 @@ struct HotkeySettingsView: View {
                 HStack {
                     Image(systemName: "keyboard")
                         .foregroundColor(.secondary)
-                    Text("点击快捷键区域重新录制")
+                    Text("点击快捷键区域重新录制（注意：每次升级都需要关闭服务权限再重新开启）")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     Spacer()
