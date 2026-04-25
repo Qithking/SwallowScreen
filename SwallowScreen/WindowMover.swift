@@ -34,10 +34,12 @@ class WindowMover: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let bundleID = app.bundleIdentifier else { return }
+            
+            let pid = app.processIdentifier
             Task { @MainActor [weak self] in
-                guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                      let bundleID = app.bundleIdentifier else { return }
-                self?.handleAppLaunch(bundleIdentifier: bundleID, pid: app.processIdentifier)
+                self?.handleAppLaunch(bundleIdentifier: bundleID, pid: pid)
             }
         }
     }
