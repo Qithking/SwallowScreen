@@ -364,17 +364,76 @@ delete_tag() {
     fi
 }
 
+# 重新触发最新版本的 GitHub Actions
+rerun_latest_action() {
+    echo ""
+    echo "=== 重新触发最新版本的 GitHub Actions ==="
+    echo ""
+    
+    # 检查 GitHub CLI
+    if ! command -v gh &> /dev/null; then
+        echo_error "需要安装 GitHub CLI"
+        echo "安装命令: brew install gh"
+        exit 1
+    fi
+    
+    # 检查登录状态
+    if ! gh auth status &> /dev/null; then
+        echo_error "未登录 GitHub"
+        echo "请运行: gh auth login"
+        exit 1
+    fi
+    
+    # 获取远程仓库名称
+    remote_name=$(git remote 2>/dev/null | head -1)
+    if [ -z "$remote_name" ]; then
+        echo_error "未找到远程仓库"
+        exit 1
+    fi
+    echo_info "检测到远程仓库: $remote_name"
+    
+    # 获取最新 tag
+    echo_info "获取最新版本 tag..."
+    latest_tag=$(git tag --sort=-version:refname 2>/dev/null | head -1)
+    
+    if [ -z "$latest_tag" ]; then
+        echo_error "未找到任何 tag"
+        exit 1
+    fi
+    
+    echo_info "最新版本: $latest_tag"
+    echo ""
+    read -p "确认重新触发 $latest_tag 的构建? (y/n): " confirm
+    
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo_info "已取消"
+        return
+    fi
+    
+    # 删除并重新推送 tag
+    echo ""
+    echo_info "删除远程 tag..."
+    git push "$remote_name" --delete "$latest_tag" 2>/dev/null || echo_warning "远程 tag 可能不存在"
+    
+    echo_info "重新推送 tag: $latest_tag"
+    git push "$remote_name" "$latest_tag"
+    
+    echo_success "已重新触发 GitHub Actions!"
+    echo_info "查看构建进度: https://github.com/Qithking/SwallowScreen/actions"
+}
+
 # 主菜单
 show_menu() {
     echo ""
     echo "╔══════════════════════════════════════════════════╗"
-    echo "║          SwallowScreen 发布工具 v1.0              ║"
+    echo "║          SwallowScreen 发布工具 v1.0            ║"
     echo "╠══════════════════════════════════════════════════╣"
     echo "║  1. 提交代码到 GitHub (main 分支)                 ║"
     echo "║  2. 发布新版本 (创建 tag 触发 GitHub Actions)     ║"
     echo "║  3. 下载最新版本 DMG                             ║"
     echo "║  4. 清除失败的 GitHub Actions                    ║"
     echo "║  5. 删除指定 Tag                                 ║"
+    echo "║  6. 重新触发最新版本 GitHub Actions             ║"
     echo "║  0. 退出                                          ║"
     echo "╚══════════════════════════════════════════════════╝"
     echo ""
@@ -386,7 +445,7 @@ main() {
     
     while true; do
         show_menu
-        read -p "请选择操作 (0-5): " choice
+        read -p "请选择操作 (0-6): " choice
         
         case $choice in
             1)
@@ -404,12 +463,15 @@ main() {
             5)
                 delete_tag
                 ;;
+            6)
+                rerun_latest_action
+                ;;
             0)
                 echo_info "再见!"
                 exit 0
                 ;;
             *)
-                echo_error "无效选择，请输入 0-5"
+                echo_error "无效选择，请输入 0-6"
                 ;;
         esac
         

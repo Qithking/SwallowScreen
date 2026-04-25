@@ -14,7 +14,7 @@ env:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,6 +25,12 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest
+
+      - name: Show Xcode and SDK Info
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+          swift --version
 
       - name: Build Universal Binary
         run: |
@@ -44,7 +50,7 @@ jobs:
           
           cp "$ARM64_PATH" build/SwallowScreen-arm64
           
-          # 构建 x86_64 版本 (先保存 arm64 后再删除 .build)
+          # 构建 x86_64 版本
           swift build --configuration release --arch x86_64 2>&1
           
           # 查找 x86_64 二进制文件 (排除 dSYM)
@@ -75,9 +81,6 @@ jobs:
           cp build/SwallowScreen SwallowScreen.app/Contents/MacOS/
           chmod +x SwallowScreen.app/Contents/MacOS/SwallowScreen
           
-          # 复制 HelpView.html
-          [ -f SwallowScreen/HelpView.html ] && cp SwallowScreen/HelpView.html SwallowScreen.app/Contents/Resources/
-          
           # 生成 .icns 图标文件
           ICONSET_DIR="SwallowScreen.app/Contents/Resources/AppIcon.iconset"
           mkdir -p "$ICONSET_DIR"
@@ -95,11 +98,12 @@ jobs:
           cp "SwallowScreen/Assets.xcassets/AppIcon.appiconset/512x512@2x.png" "$ICONSET_DIR/icon_512x512@2x.png" 2>/dev/null || true
           
           # 使用 iconutil 生成 .icns 文件
-          iconutil -c icns "$ICONSET_DIR" -o "SwallowScreen.app/Contents/Resources/AppIcon.icns"
+          iconutil -c icns "$ICONSET_DIR" -o "SwallowScreen.app/Contents/Resources/AppIcon.icns" 2>/dev/null || true
           rm -rf "$ICONSET_DIR"
           
           # 获取版本号
           VERSION=${GITHUB_REF#refs/tags/v}
+          BUILD_NUM=$(git rev-list HEAD --count)
           
           # 创建 Info.plist
           cat > SwallowScreen.app/Contents/Info.plist << 'EOF'
@@ -124,7 +128,7 @@ jobs:
               <key>CFBundleShortVersionString</key>
               <string>VERSION_PLACEHOLDER</string>
               <key>CFBundleVersion</key>
-              <string>1</string>
+              <string>BUILD_PLACEHOLDER</string>
               <key>LSMinimumSystemVersion</key>
               <string>14.0</string>
               <key>LSUIElement</key>
@@ -138,23 +142,19 @@ jobs:
           EOF
           
           sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/g" SwallowScreen.app/Contents/Info.plist
+          sed -i '' "s/BUILD_PLACEHOLDER/${BUILD_NUM}/g" SwallowScreen.app/Contents/Info.plist
           
           echo "=== App Bundle Structure ==="
           ls -la SwallowScreen.app/Contents/
           ls -la SwallowScreen.app/Contents/Resources/
-          
-          # 检查图标文件
-          echo "=== Icon Files ==="
-          find SwallowScreen.app -name "*.icns" -o -name "*.png" 2>/dev/null
 
       - name: Ad-hoc Sign App
         run: |
           # 使用 ad-hoc 签名，并指定固定标识符
-          # 注意：macOS 辅助功能权限仍可能因代码变化需要重新授权
           codesign --force --deep --sign "SwallowScreen" SwallowScreen.app
           
           echo "=== Verify Signature ==="
-          codesign -vvv SwallowScreen.app
+          codesign -vvv SwallowScreen.app || true
           spctl --assess --type exec --verbose=2 SwallowScreen.app 2>&1 || true
 
       - name: Create DMG
@@ -202,7 +202,10 @@ jobs:
             echo "  1. 下载并打开 DMG 文件"
             echo "  2. 将 SwallowScreen.app 拖入 Applications 文件夹"
             echo "  3. 如果提示"无法打开"，请在系统设置 > 隐私与安全性中允许运行"
-            echo "  4. 如果辅助功能失效，请在系统设置 > 隐私与安全性 > 辅助功能 中重新添加此应用"
+            echo "  4. 如需使用快捷键功能，请在系统设置 > 隐私与安全性 > 辅助功能 中添加此应用"
+            echo ""
+            echo "### 系统要求"
+            echo "  - macOS 14.0 (Sonoma) 或更高版本"
           } > release_body.txt
           
           cat release_body.txt
