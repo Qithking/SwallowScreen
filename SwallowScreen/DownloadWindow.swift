@@ -17,7 +17,7 @@ class DownloadWindowController: NSWindowController {
         let window = NSWindow(contentViewController: hostingController)
         window.title = "下载更新"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 320, height: 180))
+        window.setContentSize(NSSize(width: 420, height: 170))
         window.center()
         window.isReleasedWhenClosed = false
         
@@ -46,54 +46,105 @@ struct DownloadWindowContentView: View {
     }
     
     var body: some View {
-        VStack(spacing: 6) {
-            // 状态图标
-            Image(systemName: statusIcon)
-                .font(.system(size: 32))
-                .foregroundColor(statusColor)
-            
-            // 状态文本
-            Text(statusText)
-                .font(.subheadline)
-            
-            // 进度条
-            if downloadStatus == .downloading {
-                VStack(spacing: 3) {
-                    ProgressView(value: downloadProgress)
-                        .progressViewStyle(.linear)
-                        .frame(width: 200)
-                    
-                    Text("\(Int(downloadProgress * 100))%")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .monospacedDigit()
-                }
-            }
-            
-            // 错误信息
-            if downloadStatus == .failed {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-            }
-            
-            // 按钮
+        VStack(spacing: 10) {
+            // 上半部分：左边图标 + 右边进度条
             HStack(spacing: 12) {
-                if downloadStatus == .downloading {
-                    Button("取消") {
-                        cancelDownload()
+                // 左边：应用图标
+                if let appIcon = NSImage(named: NSImage.applicationIconName) {
+                    Image(nsImage: appIcon)
+                        .resizable()
+                        .frame(width: 48, height: 48)
+                        .cornerRadius(10)
+                } else {
+                    Image("AppIcon")
+                        .resizable()
+                        .frame(width: 48, height: 48)
+                        .cornerRadius(10)
+                }
+                
+                // 右边：进度信息
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("正在下载 v\(version)")
+                        .font(.headline)
+                    
+                    if downloadStatus == .downloading {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ProgressView(value: downloadProgress)
+                                .progressViewStyle(.linear)
+                                .frame(height: 8)
+                            
+                            Text("\(Int(downloadProgress * 100))%")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .monospacedDigit()
+                        }
+                    } else if downloadStatus == .completed {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(.green)
+                            Text("下载完成")
+                                .foregroundColor(.green)
+                        }
+                        .font(.subheadline)
                     }
-                } else if downloadStatus == .failed {
-                    Button("重试") {
-                        startDownload()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            
+            // 分割线
+            Divider()
+            
+            // 下半部分：左边错误信息 + 右边按钮
+            HStack(spacing: 12) {
+                // 左边：失败信息
+                VStack(alignment: .leading, spacing: 2) {
+                    if downloadStatus == .failed {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                            Text("下载失败")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                        }
+                        
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                    } else if downloadStatus == .downloading {
+                        Text("正在下载更新文件...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                
+                // 右边：按钮
+                HStack(spacing: 6) {
+                    if downloadStatus == .downloading {
+                        Button(action: cancelDownload) {
+                            Text("取消")
+                                .frame(minWidth: 60)
+                        }
+                        .buttonStyle(.bordered)
+                    } else if downloadStatus == .failed {
+                        Button(action: copyDownloadLink) {
+                            Label("复制链接", systemImage: "doc.on.doc")
+                                .frame(minWidth: 80)
+                        }
+                        .buttonStyle(.bordered)
+                        
+                        Button(action: startDownload) {
+                            Label("重试", systemImage: "arrow.clockwise")
+                                .frame(minWidth: 60)
+                        }
+                        .buttonStyle(.borderedProminent)
                     }
                 }
             }
         }
-        .padding(16)
-        .frame(width: 280, height: 140)
+        .padding(10)
+        .frame(width: 380, height: 140)
         .onAppear {
             startDownload()
         }
@@ -140,12 +191,11 @@ struct DownloadWindowContentView: View {
         DownloadManager.shared.download(from: downloadURL) { progress in
             self.downloadProgress = progress
         } onComplete: { localURL in
-            self.downloadStatus = .completed
             if let url = localURL {
                 NSWorkspace.shared.open(url)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.closeWindow()
-                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.closeWindow()
             }
         } onError: { error in
             self.downloadStatus = .failed
@@ -156,6 +206,12 @@ struct DownloadWindowContentView: View {
     private func cancelDownload() {
         DownloadManager.shared.cancel()
         closeWindow()
+    }
+    
+    private func copyDownloadLink() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(downloadURL.absoluteString, forType: .string)
     }
     
     private func closeWindow() {
