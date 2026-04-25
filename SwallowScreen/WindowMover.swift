@@ -243,7 +243,8 @@ class WindowMover: ObservableObject {
         for screen in NSScreen.screens {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
             let name = screen.localizedName
-            let frame = screen.frame
+            // 使用 visibleFrame 获取可视区域（排除菜单栏和 Dock）
+            let frame = screen.visibleFrame
             let serialNumber = getScreenSerialNumber(for: screen)
             mappings.append(ScreenInfo(id: screenID, name: name, frame: frame, serialNumber: serialNumber))
         }
@@ -386,7 +387,8 @@ class WindowMover: ObservableObject {
     /// 获取屏幕ID
     private func getScreenID(_ screenFrame: CGRect) -> UInt32? {
         for screen in NSScreen.screens {
-            if screen.frame == screenFrame {
+            // 优先匹配 visibleFrame
+            if screen.visibleFrame == screenFrame {
                 return screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
             }
         }
@@ -424,7 +426,8 @@ class WindowMover: ObservableObject {
         for screen in NSScreen.screens {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
             if screenID == displayID {
-                return screen.frame
+                // 使用 visibleFrame 返回可视区域（排除菜单栏和 Dock）
+                return screen.visibleFrame
             }
         }
         return nil
