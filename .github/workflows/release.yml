@@ -150,8 +150,8 @@ jobs:
 
       - name: Ad-hoc Sign App
         run: |
-          # 使用 ad-hoc 签名，并指定固定标识符
-          codesign --force --deep --sign "SwallowScreen" SwallowScreen.app
+          # 使用 ad-hoc 签名（使用 - 表示 ad-hoc），并指定固定标识符
+          codesign --force --deep --sign - --entitlements /dev/null SwallowScreen.app
           
           echo "=== Verify Signature ==="
           codesign -vvv SwallowScreen.app || true
