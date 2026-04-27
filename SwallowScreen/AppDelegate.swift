@@ -72,9 +72,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            // 使用压缩后的适合菜单栏的图片
-            let imagePath = Bundle.main.path(forResource: "menu_icon", ofType: "png", inDirectory: "assets")
-            if let path = imagePath, let image = NSImage(contentsOfFile: path) {
+            // 使用 Asset Catalog 中的图片
+            if let image = NSImage(named: "MenuIcon") {
                 image.isTemplate = true
                 button.image = image
             } else if let image = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "SwallowScreen") {
