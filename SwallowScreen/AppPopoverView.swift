@@ -524,7 +524,7 @@ struct AppRowView: View {
             
             Spacer(minLength: 8)
             
-            // 屏幕选择下拉框
+            // 屏幕选择下拉框 - 最大宽度限制为当前窗口的50%
             Menu {
                 Button("不指定屏幕") {
                     onScreenSelected(nil)
@@ -552,6 +552,7 @@ struct AppRowView: View {
                             .font(.caption)
                             .foregroundColor(.primary)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                     } else {
                         Text("不指定")
                             .font(.caption)
@@ -565,9 +566,9 @@ struct AppRowView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
                 )
+                .frame(maxWidth: 180, alignment: .trailing) // 360px窗口的50%
             }
             .menuStyle(.borderlessButton)
-            .fixedSize()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
