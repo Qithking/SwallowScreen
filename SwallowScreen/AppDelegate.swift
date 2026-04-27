@@ -72,11 +72,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
-            // 使用指定的图片作为菜单栏图标
-            let imagePath = Bundle.main.path(forResource: "imgs_swallow_transparent_bg", ofType: "png", inDirectory: "assets")
+            // 使用压缩后的适合菜单栏的图片
+            let imagePath = Bundle.main.path(forResource: "menu_icon", ofType: "png", inDirectory: "assets")
             if let path = imagePath, let image = NSImage(contentsOfFile: path) {
-                // 调整图片大小以适应菜单栏
-                image.size = NSSize(width: 20, height: 20)
                 image.isTemplate = true
                 button.image = image
             } else if let image = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "SwallowScreen") {
