@@ -374,11 +374,12 @@ class WindowMover: ObservableObject {
     /// 获取包含指定点的屏幕
     private func getScreenContainingPoint(_ point: CGPoint) -> CGRect? {
         for screen in NSScreen.screens {
-            let screenFrame = screen.frame
+            // 使用 visibleFrame 来匹配 getScreenID 函数中的匹配逻辑
+            let screenFrame = screen.visibleFrame
             let relativeX = point.x - screenFrame.origin.x
             let relativeY = point.y - screenFrame.origin.y
             
-            if relativeX >= 0 && relativeX < screenFrame.width 
+            if relativeX >= 0 && relativeX < screenFrame.width
                && relativeY >= 0 && relativeY < screenFrame.height {
                 return screenFrame
             }
