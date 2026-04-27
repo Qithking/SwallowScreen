@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:SwallowScreen}",
+            "name": "Debug SwallowScreen",
+            "target": "SwallowScreen",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SwallowScreen"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:SwallowScreen}",
+            "name": "Release SwallowScreen",
+            "target": "SwallowScreen",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SwallowScreen"
+        }
+    ]
+}

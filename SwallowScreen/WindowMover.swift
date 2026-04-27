@@ -245,7 +245,7 @@ class WindowMover: ObservableObject {
         for screen in NSScreen.screens {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
             let name = screen.localizedName
-            // 使用 visibleFrame 获取可视区域（排除菜单栏和 Dock）
+            // 使用 visibleFrame 获取可视区域（排除菜单栏和 Dock），确保窗口在可视区域内居中
             let frame = screen.visibleFrame
             let serialNumber = getScreenSerialNumber(for: screen)
             mappings.append(ScreenInfo(id: screenID, name: name, frame: frame, serialNumber: serialNumber))
@@ -407,10 +407,13 @@ class WindowMover: ObservableObject {
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
         }
         
-        let centerX = targetFrame.midX - size.width / 2
-        let centerY = targetFrame.midY - size.height / 2
+        // 使用与 moveWindowToFrameImmediate 相同的计算方式，确保窗口在可视区域内正确居中
+        let newPosition = CGPoint(
+            x: targetFrame.origin.x + (targetFrame.width - size.width) / 2,
+            y: (targetFrame.height - size.height) / 2
+        )
         
-        var position = CGPoint(x: centerX, y: centerY)
+        var position = newPosition
         if let positionValue = AXValueCreate(.cgPoint, &position) {
             let result = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
             if result == .success {
@@ -428,7 +431,7 @@ class WindowMover: ObservableObject {
         for screen in NSScreen.screens {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
             if screenID == displayID {
-                // 使用 visibleFrame 返回可视区域（排除菜单栏和 Dock）
+                // 使用 visibleFrame 返回可视区域（排除菜单栏和 Dock），确保窗口在可视区域内居中
                 return screen.visibleFrame
             }
         }
