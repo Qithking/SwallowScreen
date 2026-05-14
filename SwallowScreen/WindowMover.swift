@@ -404,9 +404,9 @@ class WindowMover: ObservableObject {
             var axPosition = CGPoint.zero
             AXValueGetValue(posVal as! AXValue, .cgPoint, &axPosition)
             
-            // 如果窗口位置没变，跳过
+            // 如果窗口位置变化很小，跳过（使用容差处理浮点数精度问题）
             if let prev = previousWindowPositions[windowID],
-               prev.x == axPosition.x && prev.y == axPosition.y {
+               abs(prev.x - axPosition.x) < 1.0 && abs(prev.y - axPosition.y) < 1.0 {
                 continue
             }
             
@@ -467,10 +467,10 @@ class WindowMover: ObservableObject {
             AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
         }
         
-        // 使用与 moveWindowToFrameImmediate 相同的计算方式，确保窗口在可视区域内正确居中
+        // 计算窗口中心位置（使用完整的目标屏幕坐标）
         let newPosition = CGPoint(
             x: targetFrame.origin.x + (targetFrame.width - size.width) / 2,
-            y: (targetFrame.height - size.height) / 2
+            y: targetFrame.origin.y + (targetFrame.height - size.height) / 2
         )
         
         var position = newPosition
@@ -483,7 +483,13 @@ class WindowMover: ObservableObject {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                     self?.lastMovedWindows.remove(windowID)
                 }
+            } else {
+                // 移动失败时也要清理 movingWindows，避免窗口被永久阻塞
+                movingWindows.remove(windowID)
             }
+        } else {
+            // 创建位置值失败时也要清理 movingWindows
+            movingWindows.remove(windowID)
         }
     }
     
