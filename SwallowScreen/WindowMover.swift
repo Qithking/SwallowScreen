@@ -138,6 +138,12 @@ class WindowMover: ObservableObject {
         
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            
+            // 应用启动时立即执行一次检查，将所有已打开应用移动到指定屏幕
+            Task { @MainActor in
+                self.moveAllOpenAppsToAssignedScreens()
+            }
+            
             self.timer = Timer.scheduledTimer(withTimeInterval: self.checkInterval, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.checkAndEnforcePinnedWindows()
@@ -146,6 +152,59 @@ class WindowMover: ObservableObject {
             RunLoop.current.add(self.timer!, forMode: .common)
         }
         return true
+    }
+    
+    /// 应用启动时移动所有已打开应用到指定屏幕
+    private func moveAllOpenAppsToAssignedScreens() {
+        guard let modelContext = modelContext else { return }
+        
+        if !AXIsProcessTrusted() {
+            return
+        }
+        
+        do {
+            let descriptor = FetchDescriptor<AppInfo>()
+            let allApps = try modelContext.fetch(descriptor)
+            
+            // 获取当前所有屏幕信息
+            let currentScreens = getCurrentScreenMappings()
+            
+            for appInfo in allApps {
+                // 只有启用状态且设置了目标屏幕才处理
+                guard appInfo.isEnabled else { continue }
+                guard appInfo.targetScreenID != nil || appInfo.targetScreenSerialNumber != nil else { continue }
+                
+                // 尝试通过多种方式匹配屏幕
+                var targetScreenFrame: CGRect? = nil
+                
+                // 1. 首先尝试通过序列号匹配（最可靠）
+                if let serialNumber = appInfo.targetScreenSerialNumber {
+                    if let matchedScreen = findScreenBySerialNumber(serialNumber, currentScreens: currentScreens) {
+                        targetScreenFrame = matchedScreen.frame
+                    }
+                }
+                
+                // 2. 如果序列号匹配失败，尝试通过原始 ID 匹配
+                if targetScreenFrame == nil, let screenID = appInfo.targetScreenID {
+                    targetScreenFrame = getScreenFrame(for: screenID)
+                }
+                
+                // 3. 如果 ID 匹配失败，尝试通过名称匹配
+                if targetScreenFrame == nil, let screenName = appInfo.targetScreenName {
+                    targetScreenFrame = findScreenFrameByName(screenName, currentScreens: currentScreens)
+                }
+                
+                guard let finalTargetFrame = targetScreenFrame else { continue }
+                
+                // 找到运行中的应用并移动
+                if let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first {
+                    let pid = app.processIdentifier
+                    moveAppWindowsToScreen(pid: pid, targetFrame: finalTargetFrame)
+                }
+            }
+        } catch {
+            // 静默处理错误
+        }
     }
     
     func stopMonitoring() {
