@@ -7,6 +7,7 @@
 
 import Foundation
 import AppKit
+import CoreGraphics
 import SwiftData
 import Combine
 
@@ -82,44 +83,269 @@ class WindowMover: ObservableObject {
             
             guard let finalTargetFrame = targetFrame else { return }
             
-            // 轮询等待窗口创建并立即移动
-            pollForWindows(pid: pid, targetFrame: finalTargetFrame)
+            // 早期窗口检测 + 移动 + 稳态校验（CGWindowList 16ms + AX 100ms 双链）
+            earlyWindowCatcher(pid: pid, targetFrame: finalTargetFrame)
         }
     }
     
-    /// 轮询等待窗口创建并立即移动
-    private func pollForWindows(pid: pid_t, targetFrame: CGRect) {
-        let maxAttempts = 30  // 最多 3 秒
-        var attempts = 0
-        
-        func tryMove() {
-            guard attempts < maxAttempts else { return }
-            attempts += 1
-            
+    /// 设置 AX 窗口的 hidden 属性
+    /// - Returns: 是否设置成功（不响应 hidden 的 App 会返回 false）
+    @discardableResult
+    private func setAXWindowHidden(_ window: AXUIElement, hidden: Bool) -> Bool {
+        let value: CFBoolean = hidden ? kCFBooleanTrue : kCFBooleanFalse
+        return AXUIElementSetAttributeValue(window, kAXHiddenAttribute as CFString, value) == .success
+    }
+
+    /// 对一组窗口执行 hide → move → unhide。
+    /// unhide 失败时（少数 App 在 hidden=true → move → hidden=false 时第二次 set 会失败），
+    /// 100ms 后兜底重试一次，避免窗口永久不可见。
+    private func hideMoveUnhide(axWindows: [AXUIElement], targetFrame: CGRect) {
+        for window in axWindows { setAXWindowHidden(window, hidden: true) }
+        for window in axWindows { moveWindowToFrameImmediate(window, targetFrame: targetFrame) }
+        for window in axWindows {
+            if !setAXWindowHidden(window, hidden: false) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.setAXWindowHidden(window, hidden: false)
+                }
+            }
+        }
+    }
+
+    /// 通过 CGWindowList 查找指定 PID 的第一个"普通 on-screen"窗口 bounds
+    /// 过滤条件：ownerPID 匹配 + layer == 0（普通窗口，过滤菜单栏/系统浮层）+ bounds 非空
+    private func findOnScreenWindow(for pid: pid_t) -> CGRect? {
+        let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        for window in windowList {
+            guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == pid else {
+                continue
+            }
+            // 仅普通窗口（layer 0 为普通窗口，浮层/菜单栏是更高 layer）
+            if let layer = window[kCGWindowLayer as String] as? Int, layer != 0 {
+                continue
+            }
+            // bounds 字段以 CFDictionary 形式给出 {X, Y, Width, Height}
+            if let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+               let x = boundsDict["X"] as? CGFloat,
+               let y = boundsDict["Y"] as? CGFloat,
+               let width = boundsDict["Width"] as? CGFloat,
+               let height = boundsDict["Height"] as? CGFloat,
+               width > 0, height > 0 {
+                return CGRect(x: x, y: y, width: width, height: height)
+            }
+        }
+        return nil
+    }
+
+    /// 在 AX 窗口列表中按 (position, size) 容差匹配，拿到与 CGWindowList 同一窗口对应的 AXUIElement
+    /// 容差 1.0 像素，覆盖浮点精度问题
+    private func matchAXWindow(for pid: pid_t, targetBounds: CGRect) -> AXUIElement? {
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowsValue: CFTypeRef?
+
+        let result = AXUIElementCopyAttributeValue(
+            appElement,
+            kAXWindowsAttribute as CFString,
+            &windowsValue
+        )
+
+        guard result == .success, let windows = windowsValue as? [AXUIElement] else {
+            return nil
+        }
+
+        for window in windows {
+            var posVal: CFTypeRef?
+            var sizeVal: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posVal) == .success,
+                  AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeVal) == .success,
+                  let posVal = posVal, let sizeVal = sizeVal else {
+                continue
+            }
+
+            var position = CGPoint.zero
+            var size = CGSize.zero
+            guard AXValueGetValue(posVal as! AXValue, .cgPoint, &position),
+                  AXValueGetValue(sizeVal as! AXValue, .cgSize, &size) else {
+                continue
+            }
+
+            if abs(position.x - targetBounds.origin.x) < 1.0,
+               abs(position.y - targetBounds.origin.y) < 1.0,
+               abs(size.width - targetBounds.width) < 1.0,
+               abs(size.height - targetBounds.height) < 1.0 {
+                return window
+            }
+        }
+        return nil
+    }
+
+    /// 早期窗口检测 + 移动 + 稳态校验（替代旧的 pollForWindows）
+    /// Phase A: 双链并行检测窗口（CGWindowList 16ms + AX 100ms 兜底），任一链先命中即触发 Phase B
+    /// Phase B: 拿到 AXUIElement 后调用 moveWindowToFrameImmediate
+    /// Phase C: 1.5-2s 内每 100ms 校验一次，发现回弹立刻再搬
+    private func earlyWindowCatcher(pid: pid_t, targetFrame: CGRect) {
+        let detectionTimeout: TimeInterval = 5.0
+        // 共享停止标记：任一链命中后，另一链下一轮自检就会退出
+        let stopFlag = AtomicFlag()
+
+        // 链 A：CGWindowList 16ms 高频轮询
+        DispatchQueue.main.async { [weak self] in
+            self?.runCGDetectionLoop(pid: pid, targetFrame: targetFrame, stopFlag: stopFlag, timeout: detectionTimeout)
+        }
+        // 链 B：AX 100ms 兜底（无 Screen Recording 权限时仍能工作）
+        DispatchQueue.main.async { [weak self] in
+            self?.runAXDetectionLoop(pid: pid, targetFrame: targetFrame, stopFlag: stopFlag, timeout: detectionTimeout)
+        }
+    }
+
+    /// 链 A：CGWindowList 16ms 高频轮询
+    private func runCGDetectionLoop(pid: pid_t, targetFrame: CGRect, stopFlag: AtomicFlag, timeout: TimeInterval) {
+        let startTime = Date()
+        let interval: TimeInterval = 0.016  // 16ms
+
+        func tick() {
+            if stopFlag.isSet { return }
+            if Date().timeIntervalSince(startTime) > timeout { return }
             guard NSRunningApplication(processIdentifier: pid) != nil else { return }
-            
-            let appElement = AXUIElementCreateApplication(pid)
-            var windowsValue: CFTypeRef?
-            
-            let result = AXUIElementCopyAttributeValue(
-                appElement,
-                kAXWindowsAttribute as CFString,
-                &windowsValue
-            )
-            
-            if result == .success, let windows = windowsValue as? [AXUIElement], !windows.isEmpty {
-                for window in windows {
-                    moveWindowToFrameImmediate(window, targetFrame: targetFrame)
+
+            if let bounds = findOnScreenWindow(for: pid) {
+                if stopFlag.trySet() {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onWindowDetected(pid: pid, targetFrame: targetFrame, initialBounds: bounds)
+                    }
                 }
                 return
             }
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                tryMove()
+            DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
+                self?.runCGDetectionLoop(pid: pid, targetFrame: targetFrame, stopFlag: stopFlag, timeout: timeout)
             }
         }
-        
-        tryMove()
+        tick()
+    }
+
+    /// 链 B：AX 100ms 兜底轮询
+    private func runAXDetectionLoop(pid: pid_t, targetFrame: CGRect, stopFlag: AtomicFlag, timeout: TimeInterval) {
+        let startTime = Date()
+        let interval: TimeInterval = 0.1  // 100ms
+
+        func tick() {
+            if stopFlag.isSet { return }
+            if Date().timeIntervalSince(startTime) > timeout { return }
+            guard NSRunningApplication(processIdentifier: pid) != nil else { return }
+
+            let appElement = AXUIElementCreateApplication(pid)
+            var windowsValue: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
+
+            if result == .success, let windows = windowsValue as? [AXUIElement], !windows.isEmpty {
+                if stopFlag.trySet() {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onWindowDetected(pid: pid, targetFrame: targetFrame, axWindows: windows)
+                    }
+                }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
+                self?.runAXDetectionLoop(pid: pid, targetFrame: targetFrame, stopFlag: stopFlag, timeout: timeout)
+            }
+        }
+        tick()
+    }
+
+    /// 窗口被检测到（CG 链命中）：用 bounds 匹配 AXUIElement，再移动
+    private func onWindowDetected(pid: pid_t, targetFrame: CGRect, initialBounds: CGRect) {
+        guard NSRunningApplication(processIdentifier: pid) != nil else { return }
+
+        // 用 CG bounds 去 AX 列表里匹配同一个窗口
+        if let axWindow = matchAXWindow(for: pid, targetBounds: initialBounds) {
+            // hide → move → unhide，让用户看不到"错误屏幕位置"那一两帧
+            hideMoveUnhide(axWindows: [axWindow], targetFrame: targetFrame)
+        } else {
+            // AX 拿不到这个窗口（罕见），回退到直接搬 AX 列表里所有窗口
+            let appElement = AXUIElementCreateApplication(pid)
+            var windowsValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+               let axWindows = windowsValue as? [AXUIElement] {
+                hideMoveUnhide(axWindows: axWindows, targetFrame: targetFrame)
+            }
+        }
+
+        // 1 帧延迟后再进入稳态校验，避免"移动刚发出还没生效"导致的无谓二次移动
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
+            self?.startStabilityCheck(pid: pid, targetFrame: targetFrame)
+        }
+    }
+
+    /// 窗口被检测到（AX 链命中）：直接遍历所有 AX 窗口并移动
+    private func onWindowDetected(pid: pid_t, targetFrame: CGRect, axWindows: [AXUIElement]) {
+        guard NSRunningApplication(processIdentifier: pid) != nil else { return }
+        // hide → move → unhide（兜底路径没有具体目标，对全部窗口整体隐藏至 move 完成）
+        hideMoveUnhide(axWindows: axWindows, targetFrame: targetFrame)
+
+        // 1 帧延迟后再进入稳态校验
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
+            self?.startStabilityCheck(pid: pid, targetFrame: targetFrame)
+        }
+    }
+
+    /// 稳态校验：1.5-2s 内每 100ms 检查一次，发现回弹立刻再搬，连续 3 次稳定停止
+    private func startStabilityCheck(pid: pid_t, targetFrame: CGRect) {
+        runStabilityTick(pid: pid, targetFrame: targetFrame,
+                         startTime: Date(), stableCount: 0)
+    }
+
+    /// 稳态校验单次 tick：取出当前窗口 bounds → 判断稳定 → 必要时重新搬
+    private func runStabilityTick(pid: pid_t, targetFrame: CGRect,
+                                  startTime: Date, stableCount: Int) {
+        let checkInterval: TimeInterval = 0.1
+        let maxDuration: TimeInterval = 2.0
+        let requiredStableCount = 3
+
+        guard NSRunningApplication(processIdentifier: pid) != nil else { return }
+        if Date().timeIntervalSince(startTime) > maxDuration { return }
+
+        let currentBounds = findOnScreenWindow(for: pid)
+        let isStable = currentBounds.map { isBoundsInTargetFrame($0, targetFrame: targetFrame) } ?? false
+
+        if isStable {
+            let newCount = stableCount + 1
+            if newCount >= requiredStableCount { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + checkInterval) { [weak self] in
+                self?.runStabilityTick(pid: pid, targetFrame: targetFrame,
+                                       startTime: startTime, stableCount: newCount)
+            }
+        } else {
+            // 回弹：重新搬（hide → move → unhide，与初始搬动保持一致，避免窗口在两屏间反复闪烁）
+            if let bounds = currentBounds,
+               let axWindow = matchAXWindow(for: pid, targetBounds: bounds) {
+                hideMoveUnhide(axWindows: [axWindow], targetFrame: targetFrame)
+            } else {
+                // AX 拿不到该窗口，回退到搬所有窗口
+                let appElement = AXUIElementCreateApplication(pid)
+                var windowsValue: CFTypeRef?
+                if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+                   let axWindows = windowsValue as? [AXUIElement] {
+                    hideMoveUnhide(axWindows: axWindows, targetFrame: targetFrame)
+                } else {
+                    moveAppWindowsToScreen(pid: pid, targetFrame: targetFrame)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + checkInterval) { [weak self] in
+                self?.runStabilityTick(pid: pid, targetFrame: targetFrame,
+                                       startTime: startTime, stableCount: 0)
+            }
+        }
+    }
+
+    /// 判断窗口 bounds 的中心点是否在目标屏幕的可视区域内
+    private func isBoundsInTargetFrame(_ bounds: CGRect, targetFrame: CGRect) -> Bool {
+        let centerX = bounds.origin.x + bounds.width / 2
+        let centerY = bounds.origin.y + bounds.height / 2
+        return targetFrame.contains(CGPoint(x: centerX, y: centerY))
     }
     
     func configure(modelContext: ModelContext) {
@@ -296,6 +522,19 @@ class WindowMover: ObservableObject {
         let name: String
         let frame: CGRect
         let serialNumber: String?
+    }
+
+    /// 简单的"一次性触发"标记，用于双链并行检测中让先命中的链通知另一链停止
+    /// 所有访问均在主队列上，无需锁
+    private final class AtomicFlag {
+        private var _isSet = false
+        var isSet: Bool { _isSet }
+        /// 尝试设置：仅在未设置时成功，返回是否成功设置
+        func trySet() -> Bool {
+            if _isSet { return false }
+            _isSet = true
+            return true
+        }
     }
     
     /// 获取当前屏幕映射
