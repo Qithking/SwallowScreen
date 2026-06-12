@@ -478,11 +478,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let context = container.mainContext
             let descriptor = FetchDescriptor<AppInfo>(predicate: #Predicate { $0.bundleIdentifier == bundleID })
 
+            var titlePattern: String? = nil
             if let existing = try? context.fetch(descriptor).first {
                 existing.updateScreen(screenID: screenID, screenName: screen.localizedName, screenSerialNumber: screenSerialNumber)
                 // R-167: 用户主动 set 屏 = 重新启用屏幕规则——clear 之后 set 恢复 isEnabled
                 //        与 updatePinToScreen 的 `if pinned && !isEnabled { isEnabled = true }` 对齐
                 existing.isEnabled = true
+                titlePattern = existing.windowTitlePattern
             } else {
                 let newInfo = AppInfo(
                     bundleIdentifier: bundleID,
@@ -497,6 +499,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // RT41: save 失败时通过 NSAlert 反馈
             do {
                 try context.save()
+                // FIX: 设置屏幕后通知 WindowMover 刷新缓存和 pinObserver
+                NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
             } catch {
                 os_log("setCurrentAppScreen save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
                 Self.showSaveErrorAlert(error: error)
@@ -507,7 +511,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             //       （原 moveAppToScreen 走 moveAppWindowsToScreen 老路径，无防闪烁）
             // R-216: windowMover 为 nil 时 os_log 提示——启动期 / 权限未授予窗口期不静默失败
             if let mover = windowMover {
-                mover.moveAppToScreen(bundleIdentifier: bundleID, screenID: screenID, screenSerialNumber: screenSerialNumber)
+                mover.moveAppToScreen(bundleIdentifier: bundleID, screenID: screenID, screenSerialNumber: screenSerialNumber, titlePattern: titlePattern)
             } else {
                 os_log("setCurrentAppScreen: windowMover 未就绪，bundleID=%{public}@ 配置已落盘但窗口未移动（启动期或权限未授予）",
                        log: OSLog.default, type: .error, bundleID)
@@ -528,11 +532,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
             if let existing = try? context.fetch(descriptor).first {
                 existing.updateScreen(screenID: nil, screenName: nil, screenSerialNumber: nil)
+                // FIX: 清屏时同步关闭 pinToScreen——pin 需要目标屏幕才有意义，
+                // 否则 pinToScreen=true 但无目标屏幕是无效状态
+                if existing.pinToScreen {
+                    existing.updatePinToScreen(false)
+                }
                 existing.isEnabled = false
 
                 // RT41: 同上
                 do {
                     try context.save()
+                    // FIX: 清除屏幕后通知 WindowMover 刷新缓存和 pinObserver
+                    NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
                 } catch {
                     os_log("clearCurrentAppScreen save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
                     Self.showSaveErrorAlert(error: error)

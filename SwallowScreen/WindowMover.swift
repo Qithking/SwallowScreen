@@ -111,6 +111,8 @@ class WindowMover: ObservableObject {
     }
 
     deinit {
+        // FIX: deinit 是 nonisolated，不能直接修改 @MainActor 属性
+        // 但 Self.shared 是 weak var，ARC 释放时会自动置 nil，无需手动清理
         // RT149: 显式 cancel 顶层 dispatch timer；之前漏 cancel 导致 ARC 释放时
         //        dispatch source 仍持引用直到 timer 触发或手动 cancel
         self.timer?.cancel()
@@ -130,15 +132,18 @@ class WindowMover: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
         }
         // AXObserver 清理：移除所有 run loop source + observer
+        // FIX: deinit 可能在非主线程执行，CFRunLoopGetCurrent() 返回错误的 RunLoop
+        //      source 是加在主 RunLoop 上的，必须从主 RunLoop 移除
+        let mainRunLoop = CFRunLoopGetMain()
         for (_, source) in axRunLoopSources {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
+            CFRunLoopRemoveSource(mainRunLoop, source, .defaultMode)
         }
         axRunLoopSources.removeAll()
         axObservers.removeAll()
         pendingAXObservations.removeAll()
         // pinToScreen observer 清理
         for (_, source) in pinRunLoopSources {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
+            CFRunLoopRemoveSource(mainRunLoop, source, .defaultMode)
         }
         pinRunLoopSources.removeAll()
         pinObservers.removeAll()
@@ -399,13 +404,16 @@ class WindowMover: ObservableObject {
     private func startGlobalMouseUpMonitor() {
         guard globalMouseUpMonitor == nil else { return }
         globalMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
-            self?.handleGlobalMouseUp()
+            DispatchQueue.main.async {
+                self?.handleGlobalMouseUp()
+            }
         }
     }
 
     /// 全局鼠标松开回调——检查所有等待松手后回弹的窗口
+    /// FIX: 松手后如果 pendingDragCheckPids 仍非空（多窗口拖拽场景），重新启动 monitor
     private func handleGlobalMouseUp() {
-        // 移除监听
+        // 移除当前监听
         if let monitor = globalMouseUpMonitor {
             NSEvent.removeMonitor(monitor)
             globalMouseUpMonitor = nil
@@ -418,6 +426,12 @@ class WindowMover: ObservableObject {
         // 逐个检查回弹
         for pid in pidsToCheck {
             performPinCheck(pid: pid)
+        }
+
+        // FIX: 如果在检查过程中又有新的拖拽 move 事件（pendingDragCheckPids 重新非空），
+        // 重新启动 monitor
+        if !pendingDragCheckPids.isEmpty {
+            startGlobalMouseUpMonitor()
         }
     }
 
@@ -481,6 +495,11 @@ class WindowMover: ObservableObject {
         pinWindowCache.removeValue(forKey: pid)
         pinWindowSizeCache.removeValue(forKey: pid)
         pendingDragCheckPids.remove(pid)
+        // FIX: 如果没有待检查的拖拽窗口了，清理全局鼠标松开监听
+        if pendingDragCheckPids.isEmpty, let monitor = globalMouseUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMouseUpMonitor = nil
+        }
     }
 
     /// 刷新所有 pinned app 的 pinObserver（配置变更时调用）
@@ -522,8 +541,9 @@ class WindowMover: ObservableObject {
         }
         pinTargetCache = newPinTargetCache
 
-        // 移除不再需要的 observer
-        for pid in pinObservers.keys where !desiredPids.contains(pid) {
+        // FIX: 先收集要移除的 pid，避免遍历中修改字典导致未定义行为
+        let pidsToRemove = pinObservers.keys.filter { !desiredPids.contains($0) }
+        for pid in pidsToRemove {
             removePinObserver(for: pid)
         }
     }
@@ -560,7 +580,9 @@ class WindowMover: ObservableObject {
             self.removePinObserver(for: pid)
             // 删除该 pid 前缀的所有 windowID 键
             let pidPrefix = "\(pid)-"
-            for key in self.previousWindowPositions.keys where key.hasPrefix(pidPrefix) {
+            // FIX: 先收集要删除的 key，避免遍历中修改字典导致未定义行为
+            let posKeysToRemove = self.previousWindowPositions.keys.filter { $0.hasPrefix(pidPrefix) }
+            for key in posKeysToRemove {
                 self.previousWindowPositions.removeValue(forKey: key)
                 self.previousWindowPositionsOrder.removeAll { $0 == key }
                 self.previousWindowPositionsOrderSet.remove(key)
@@ -568,7 +590,8 @@ class WindowMover: ObservableObject {
             // movingWindows / lastMovedWindows / cooldownWorkItems 同理
             self.movingWindows = self.movingWindows.filter { !$0.hasPrefix(pidPrefix) }
             self.lastMovedWindows = self.lastMovedWindows.filter { !$0.hasPrefix(pidPrefix) }
-            for key in self.cooldownWorkItems.keys where key.hasPrefix(pidPrefix) {
+            let cooldownKeysToRemove = self.cooldownWorkItems.keys.filter { $0.hasPrefix(pidPrefix) }
+            for key in cooldownKeysToRemove {
                 self.cooldownWorkItems[key]?.cancel()
                 self.cooldownWorkItems.removeValue(forKey: key)
             }
@@ -1290,7 +1313,7 @@ class WindowMover: ObservableObject {
             // 找到运行中的应用并移动（走与 handleAppLaunch 相同的早期检测入口）
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first {
                 let pid = app.processIdentifier
-                earlyWindowCatcher(pid: pid, targetFrame: resolved.frame)
+                earlyWindowCatcher(pid: pid, targetFrame: resolved.frame, titlePattern: appInfo.windowTitlePattern)
                 processedInBatch += 1
                 if processedInBatch >= batchSize {
                     processedInBatch = 0
@@ -1336,6 +1359,13 @@ class WindowMover: ObservableObject {
         pinRunLoopSources.removeAll()
         pinObservers.removeAll()
         pinTargetCache.removeAll()
+        pinWindowCache.removeAll()
+        pinWindowSizeCache.removeAll()
+        pendingDragCheckPids.removeAll()
+        if let monitor = globalMouseUpMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMouseUpMonitor = nil
+        }
     }
     
     /// 检查并强制执行固定屏幕规则
@@ -1423,7 +1453,9 @@ class WindowMover: ObservableObject {
         let pinnedApps = cachedPinnedApps
         if pinnedApps.isEmpty {
             // 无 pinned app 时清理所有 pinObserver
-            for pid in pinObservers.keys {
+            // FIX: 先收集要移除的 pid，避免遍历中修改字典导致未定义行为
+            let pidsToRemove = Array(pinObservers.keys)
+            for pid in pidsToRemove {
                 removePinObserver(for: pid)
             }
             return
@@ -1811,9 +1843,6 @@ class WindowMover: ObservableObject {
     private func checkWindowPositionFastPath(pid: pid_t, targetFrame: CGRect, screenID: UInt32) {
         let windowID = "\(pid)-main"
 
-        // 冷却检查
-        guard !lastMovedWindows.contains(windowID) && !movingWindows.contains(windowID) else { return }
-
         // FIX-响应慢: 优先使用缓存的主窗口引用，跳过 kAXWindowsAttribute 查询
         let targetWindow: AXUIElement
         if let cached = pinWindowCache[pid] {
@@ -1849,6 +1878,7 @@ class WindowMover: ObservableObject {
               let posVal = positionValue else {
             // 无法读取位置——缓存可能失效，清除后回退
             pinWindowCache.removeValue(forKey: pid)
+            pinWindowSizeCache.removeValue(forKey: pid)
             checkWindowPosition(pid: pid, targetFrame: targetFrame, appBundleID: "", screenID: screenID)
             return
         }
@@ -1880,9 +1910,15 @@ class WindowMover: ObservableObject {
             return
         }
 
-        // 窗口不在目标屏——直接移动（已有 AX 窗口引用 + 缓存 size，无需再查询）
+        // 窗口不在目标屏——冷却检查（与 checkWindowPosition 普通路径一致，在位置判断之后）
+        if lastMovedWindows.contains(windowID) || movingWindows.contains(windowID) { return }
+
+        // 直接移动（已有 AX 窗口引用）
+        // FIX: 不传 prebuiltSize——pinWindowSizeCache 可能在窗口 resize 后过期，
+        //      导致 moveWindowToScreenCenter 用旧 size 计算居中位置偏移。
+        //      让 moveWindowToScreenCenter 自己重新读取最新 size（~3-5ms AX 调用）
         movingWindows.insert(windowID)
-        moveWindowToScreenCenter(targetWindow, targetFrame: targetFrame, windowID: windowID, prebuiltSize: size)
+        moveWindowToScreenCenter(targetWindow, targetFrame: targetFrame, windowID: windowID)
     }
 
     /// 读取 AX 字符串属性辅助方法（用于生成稳定的窗口标识）
@@ -2016,14 +2052,14 @@ class WindowMover: ObservableObject {
         return nil
     }
     
-    func moveAppToScreen(bundleIdentifier: String, screenID: UInt32, screenSerialNumber: String?) {
+    func moveAppToScreen(bundleIdentifier: String, screenID: UInt32, screenSerialNumber: String?, titlePattern: String? = nil) {
         // 首先尝试通过序列号找到屏幕
         if let serial = screenSerialNumber {
             if let matchedScreen = findScreenBySerialNumber(serial, currentScreens: getCurrentScreenMappings()) {
                 if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
                     let pid = app.processIdentifier
                     // RT67: 走 earlyWindowCatcher 链路（hide → move → unhide + 稳态校验 + 防回弹）
-                    earlyWindowCatcher(pid: pid, targetFrame: matchedScreen.frame)
+                    earlyWindowCatcher(pid: pid, targetFrame: matchedScreen.frame, titlePattern: titlePattern)
                 }
                 return
             }
@@ -2035,7 +2071,7 @@ class WindowMover: ObservableObject {
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
             let pid = app.processIdentifier
             // RT67: 同上
-            earlyWindowCatcher(pid: pid, targetFrame: screenFrame)
+            earlyWindowCatcher(pid: pid, targetFrame: screenFrame, titlePattern: titlePattern)
         }
     }
 

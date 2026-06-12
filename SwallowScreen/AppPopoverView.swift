@@ -336,6 +336,12 @@ struct AppPopoverView: View {
                 screenName: screen?.name,
                 screenSerialNumber: screen?.serialNumber
             )
+            // FIX: 清空目标屏幕时同步关闭 pinToScreen——pin 需要目标屏幕才有意义，
+            // 否则 pinToScreen=true 但无目标屏幕是无效状态，pinObserver 不会创建但 UI 上 pin 仍亮着
+            // 必须在 isEnabled 逻辑之前执行，否则 isEnabled 不会正确关闭
+            if screen == nil && existingInfo.pinToScreen {
+                existingInfo.updatePinToScreen(false)
+            }
             // R-226: 选屏 ↔ isEnabled 双向同步——与 AppDelegate.setCurrentAppScreen/clearCurrentAppScreen 对齐
             //        选 nil 屏（"不指定"）= 无目标屏幕 = isEnabled=false，避免定时器空转
             //        选非 nil 屏 = 有目标屏幕 = isEnabled=true，恢复屏幕规则
@@ -352,6 +358,11 @@ struct AppPopoverView: View {
                 targetScreenName: screen?.name,
                 targetScreenSerialNumber: screen?.serialNumber
             )
+            // FIX: 与 if 分支对齐——无目标屏幕时 isEnabled = false，
+            // 避免 isEnabled=true 但无目标屏幕的无效状态
+            if screen == nil {
+                newInfo.isEnabled = false
+            }
             modelContext.insert(newInfo)
         }
 
@@ -359,6 +370,8 @@ struct AppPopoverView: View {
         //        原 try? modelContext.save() 静默吞错，屏幕配置修改丢失也无感知
         do {
             try modelContext.save()
+            // FIX: 选屏后通知 WindowMover 刷新缓存和 pinObserver，与 updatePinToScreen 对齐
+            NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
         } catch {
             os_log("configureApp save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
             AppDelegate.showSaveErrorAlert(error: error)
