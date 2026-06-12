@@ -12,8 +12,10 @@ import os.log
 
 struct AppPopoverView: View {
     @Environment(\.modelContext) private var modelContext
-    @StateObject private var appManager = AppManager()
-    @StateObject private var screenManager = ScreenManager()
+    // P0-持久化: 改 @EnvironmentObject——由 AppDelegate 注入，跨 popover 生命周期复用
+    // 之前：@StateObject 每次 popover 重建时创建新实例 → 扫描目录 + 图标缓存重建
+    @EnvironmentObject private var appManager: AppManager
+    @EnvironmentObject private var screenManager: ScreenManager
     
     @Query private var appInfos: [AppInfo]
     @Query private var appSettings: [AppSettings]
@@ -57,6 +59,11 @@ struct AppPopoverView: View {
         }
         .frame(width: 360, height: 500)
         .onAppear {
+            // P0-持久化: AppManager 跨 popover 生命周期复用，需在每次打开时重置搜索状态
+            // 否则上次搜索词/过滤结果残留，搜索框为空但列表显示上次过滤结果
+            if appManager.searchText != "" {
+                appManager.searchText = ""
+            }
             setupSettings()
             refreshScreens()
             checkWelcomeTip()
@@ -207,6 +214,10 @@ struct AppPopoverView: View {
                             },
                             onPinToScreenChanged: { pinned in
                                 updatePinToScreen(app: app, pinned: pinned)
+                            },
+                            // M2: 注入按需图标加载入口
+                            onRequestIcon: { completion in
+                                appManager.requestIcon(for: app, completion: completion)
                             }
                         )
 
@@ -337,7 +348,6 @@ struct AppPopoverView: View {
             let newInfo = AppInfo(
                 bundleIdentifier: app.bundleIdentifier,
                 appName: app.name,
-                iconData: appManager.getIconData(for: app),
                 targetScreenID: screen?.id,
                 targetScreenName: screen?.name,
                 targetScreenSerialNumber: screen?.serialNumber
@@ -406,7 +416,6 @@ struct AppPopoverView: View {
             let newInfo = AppInfo(
                 bundleIdentifier: app.bundleIdentifier,
                 appName: app.name,
-                iconData: appManager.getIconData(for: app),
                 pinToScreen: pinned
             )
             modelContext.insert(newInfo)
@@ -420,10 +429,11 @@ struct AppPopoverView: View {
             AppDelegate.showSaveErrorAlert(error: error)
         }
 
-        // 启用固定屏幕时，立即触发检查
-        if pinned {
-            NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
-        }
+        // 启用或关闭固定屏幕时，立即触发检查
+        // FIX-pinToScreen关闭不生效: 关闭 pinToScreen 时也必须发通知，
+        // 否则 WindowMover 的 cachedPinnedApps 不会刷新，pinObserver 不会被移除，
+        // 100ms 定时器仍会把窗口搬回目标屏幕
+        NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
     }
     
     private func updateSetting(_ update: (AppSettings) -> Void) {
@@ -523,9 +533,12 @@ struct AppRowView: View {
     let isMenuBarApp: Bool  // 是否是菜单栏应用
     let onScreenSelected: (ScreenInfo?) -> Void
     let onPinToScreenChanged: (Bool) -> Void
-    
+    // M2: 图标按需懒加载入口；AppPopoverView 注入 AppManager.requestIcon 闭包
+    let onRequestIcon: ((@escaping @MainActor (NSImage?) -> Void) -> Void)?
+
     @State private var isHovering = false
-    
+    @State private var displayIcon: NSImage? = nil  // M2: 行级图标缓存，触发时更新
+
     var body: some View {
         HStack(spacing: 8) {
             // 固定屏幕图标
@@ -542,9 +555,9 @@ struct AppRowView: View {
             .help(selectedScreen == nil && !isPinToScreen
                   ? "请先选择屏幕，然后再启用固定屏幕"
                   : "固定屏幕：开启后该应用只能在此屏幕显示")
-            
-            // 应用图标
-            if let icon = app.icon {
+
+            // 应用图标（M2: 优先用 displayIcon，再回退 app.icon，最后 SF Symbol）
+            if let icon = displayIcon ?? app.icon {
                 Image(nsImage: icon)
                     .resizable()
                     .frame(width: 24, height: 24)
@@ -621,6 +634,13 @@ struct AppRowView: View {
         .onHover { hovering in
             isHovering = hovering
         }
+        // M2: 行首次可见时触发按需图标加载；displayIcon / app.icon 命中则跳过
+        .onAppear {
+            guard displayIcon == nil, app.icon == nil else { return }
+            onRequestIcon? { [self] icon in
+                displayIcon = icon
+            }
+        }
     }
 }
 
@@ -634,4 +654,6 @@ extension Notification.Name {
 #Preview {
     AppPopoverView()
         .modelContainer(for: [AppInfo.self, AppSettings.self], inMemory: true)
+        .environmentObject(AppManager())
+        .environmentObject(ScreenManager())
 }

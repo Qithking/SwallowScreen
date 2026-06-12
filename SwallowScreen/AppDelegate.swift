@@ -26,6 +26,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var pinToScreenObserverToken: Any?
     // RT60: dark mode 切换监听
     private var appearanceObserverToken: Any?
+
+    // P0-持久化: AppManager/ScreenManager 提升为 AppDelegate 级别持久对象
+    // 之前：@StateObject 在 AppPopoverView 内，每次 popover 重建时重新创建
+    //       AppManager.init() → 扫描 3 目录 + 200+ SystemApp 实例化 + 图标缓存重建
+    //       每次打开 popover 峰值 +2-4MB，关闭后虽释放但 GC 不及时
+    // 现在：AppDelegate 持有，popover 通过 @EnvironmentObject 注入，跨 popover 生命周期复用
+    let appManager = AppManager()
+    let screenManager = ScreenManager()
     
     // 快捷键标识符
     private var setScreenHotKeyID = EventHotKeyID()
@@ -177,27 +185,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     private func setupPopoverWithContainer(_ container: ModelContainer) {
+        // P0-持久化: 注入 AppDelegate 持有的 appManager/screenManager，
+        // 避免 AppPopoverView 内 @StateObject 每次重建
         let contentView = AppPopoverView()
             .modelContainer(container)
-        
+            .environmentObject(appManager)
+            .environmentObject(screenManager)
+
         let hostingController = NSHostingController(rootView: contentView)
-        
+
         let popover = NSPopover()
         popover.contentViewController = hostingController
         popover.behavior = .transient
         popover.animates = true
-        
+
         appPopover = popover
     }
     
     @objc private func toggleAppWindow() {
         guard let button = statusItem?.button else { return }
-        
+
         if let popover = appPopover, popover.isShown {
             popover.performClose(nil)
+            // M1: 关闭后立即释放 contentViewController，
+            // 切断 AppDelegate → NSPopover → NSHostingController → AppPopoverView 引用链
+            // P0-持久化: AppManager/ScreenManager 已提升为 AppDelegate 持久对象，
+            //     此处释放 contentViewController 不影响 appManager/screenManager
+            popover.contentViewController = nil
+            // P3: popover 关闭时取消正在进行的更新检查，避免 task 完成后回调已释放的 UI
+            UpdateChecker.shared.cancel()
         } else {
             if appPopover == nil {
                 initializePopover()
+            } else if appPopover?.contentViewController == nil, let container = modelContainer {
+                // M1: 重新 setup 之前释放的内容
+                setupPopoverWithContainer(container)
             }
             if let popover = appPopover {
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -627,6 +649,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 崩溃/被 kill 场景可接受丢失最近一次 frame 调整
 
         // RT28: 注销所有 observer
+        removeAllObservers()
+
+        // 注销快捷键（包含 T12 handler 释放）
+        unregisterHotKeys()
+
+        // R-154: 取消 pending frame save 并立即写一次——避免最后一次 resize 调整丢失
+        // R-219: 走 flushPendingFrameSave helper——与 windowWillClose 路径共用同一函数，消除重复
+        if let window = settingsWindow {
+            flushPendingFrameSave(window: window)
+        }
+    }
+
+    // P3: deinit 兜底——applicationWillTerminate 之外（如 crash / 异常退出）也清理 observer
+    // 之前：仅 applicationWillTerminate 清理；crash 路径下 observer token 残留，下次启动可能误触发
+    // 注：deinit 是 nonisolated，不能调 @MainActor 方法；直接内联清理逻辑
+    deinit {
+        if let observer = hotkeyObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let token = screenChangeObserverToken {
+            NotificationCenter.default.removeObserver(token)
+        }
+        if let token = openSettingsObserverToken {
+            NotificationCenter.default.removeObserver(token)
+        }
+        if let token = pinToScreenObserverToken {
+            NotificationCenter.default.removeObserver(token)
+        }
+        if let token = appearanceObserverToken {
+            NotificationCenter.default.removeObserver(token)
+        }
+    }
+
+    /// 集中清理所有 NotificationCenter observer——deinit 与 applicationWillTerminate 共用
+    private func removeAllObservers() {
         if let observer = hotkeyObserver {
             NotificationCenter.default.removeObserver(observer)
             hotkeyObserver = nil
@@ -646,15 +703,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let token = appearanceObserverToken {
             NotificationCenter.default.removeObserver(token)
             appearanceObserverToken = nil
-        }
-
-        // 注销快捷键（包含 T12 handler 释放）
-        unregisterHotKeys()
-
-        // R-154: 取消 pending frame save 并立即写一次——避免最后一次 resize 调整丢失
-        // R-219: 走 flushPendingFrameSave helper——与 windowWillClose 路径共用同一函数，消除重复
-        if let window = settingsWindow {
-            flushPendingFrameSave(window: window)
         }
     }
 }

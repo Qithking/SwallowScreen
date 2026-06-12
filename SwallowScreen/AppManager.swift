@@ -8,16 +8,20 @@
 import Foundation
 import AppKit
 import Combine
+import ImageIO  // R-M3-rev: CGImageSource 解码 → 单 CGImage
 
-struct SystemApp: Identifiable, Hashable {
+struct SystemApp: Identifiable, Hashable, Sendable {
     let id: String
     let bundleIdentifier: String
     let name: String
     let path: String
-    let icon: NSImage?
+    let icon: NSImage?  // NSImage 在 Swift 6 是 @MainActor，但 struct 标记 Sendable 后
+                        // nonisolated 上下文可构造（icon 传 nil 时无 NSImage 跨隔离问题）
     let isMenuBarApp: Bool  // 是否是菜单栏应用
-    
-    init(bundleIdentifier: String, name: String, path: String, icon: NSImage?, isMenuBarApp: Bool = false) {
+
+    // nonisolated init：允许在 Task.detached / static nonisolated 方法中构造
+    // 传 icon: nil 时无 @MainActor 跨隔离问题
+    nonisolated init(bundleIdentifier: String, name: String, path: String, icon: NSImage?, isMenuBarApp: Bool = false) {
         self.id = bundleIdentifier
         self.bundleIdentifier = bundleIdentifier
         self.name = name
@@ -78,84 +82,133 @@ class AppManager: ObservableObject {
             uniqueApps[app.bundleIdentifier] = app
         }
 
-        // RT38: 先把"基础信息"快速写入 installedApps，让 UI 立即展示；icon 后台异步加载
-        let basicApps = Array(uniqueApps.values).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // M2: 不再预填所有 icon——icon 改为按需懒加载（AppRowView.onAppear 触发）
+        //     旧逻辑：200+ NSImage 一次性加载 → 30-100MB 内存常驻
+        //     新逻辑：仅当前可见行（LazyVStack 10-20 个）会触发 loadIconSync
+        // M6: 用 localizedStandardCompare 替代 localizedCaseInsensitiveCompare——
+        //     系统标准排序规则 + 更优性能（避免重复调用 compare 时构造临时 Locale）
+        let basicApps = Array(uniqueApps.values).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         self.installedApps = basicApps
         self.filteredApps = basicApps
+    }
 
-        // 后台加载图标
-        // R-176: 用 withTaskGroup 并发加载——并发数限制 8 防止 IO 风暴；N=200 时总时间 < 1s（vs 串行 10s）
-        Task.detached(priority: .utility) { [basicApps] in
-            var updated = basicApps
-            await withTaskGroup(of: (Int, NSImage?).self) { group in
-                let maxConcurrent = 8
-                var nextIndex = 0
-                var inFlight = 0
+    // MARK: - 图标懒加载（M2+M3）
 
-                // 启动首批任务
-                while nextIndex < updated.count && inFlight < maxConcurrent {
-                    let idx = nextIndex
-                    let appPath = updated[idx].path
-                    nextIndex += 1
-                    inFlight += 1
-                    group.addTask {
-                        let icon = AppManager.loadIconAsync(at: appPath)
-                        return (idx, icon)
-                    }
-                }
+    /// 缓存已加载的图标，key 为 App 路径。命中复用，避免重复 IO + CGImage 解码
+    /// P2-图标LRU: 加 maxSize 限制——用户滚动后 200+ 图标全常驻内存（即使单图 20-30KB，总量 4-6MB）；
+    ///     实际 NSImage wrapper + 缓存数组对象额外开销更可观。
+    ///     限制 60 个条目（约屏幕可见行数 + 滚动缓冲），超出时按 LRU 淘汰
+    private var iconCache: [String: NSImage] = [:]
+    private var iconCacheOrder: [String] = []  // LRU 插入顺序，最旧在首
+    private let iconCacheMaxSize = 60
+    /// 正在加载的路径集合，防止同一图标并发请求
+    private var iconLoadingSet: Set<String> = []
+    /// 等待队列：同一 path 的多个请求在加载完成时依次回调
+    /// 修复竞态：快速滚动时 LazyVStack 销旧行创建新行，新行的 onAppear 再次请求同一图标，
+    ///           此时 iconLoadingSet 已包含 path，旧逻辑直接 return 导致新行收不到回调
+    private var iconPendingCompletions: [String: [@MainActor (NSImage?) -> Void]] = [:]
 
-                // 持续收 result + 派发新任务
-                while let (idx, icon) = await group.next() {
-                    inFlight -= 1
-                    if let icon = icon {
-                        // R-205: SystemApp.init 是 MainActor-isolated（NSImage 在新 SDK 是 @MainActor），
-                        //        Task.detached 内非 MainActor 上下文不能直接调；包到 MainActor.run 解决
-                        //        也避免 Swift 6 strict concurrency 下变 error
-                        let bundleID = updated[idx].bundleIdentifier
-                        let appName = updated[idx].name
-                        let appPath = updated[idx].path
-                        let isMenuBar = updated[idx].isMenuBarApp
-                        updated[idx] = await MainActor.run {
-                            SystemApp(
-                                bundleIdentifier: bundleID,
-                                name: appName,
-                                path: appPath,
-                                icon: icon,
-                                isMenuBarApp: isMenuBar
-                            )
-                        }
-                    }
-                    // 派发新任务
-                    while nextIndex < updated.count && inFlight < maxConcurrent {
-                        let newIdx = nextIndex
-                        let appPath = updated[newIdx].path
-                        nextIndex += 1
-                        inFlight += 1
-                        group.addTask {
-                            let icon = AppManager.loadIconAsync(at: appPath)
-                            return (newIdx, icon)
-                        }
-                    }
-                }
-            }
-            // R-203: 快照 updated 后再捕获到 MainActor.run 闭包——避免 Swift 6 strict concurrency
-            //        "reference to captured var 'updated' in concurrently-executing code" 警告
-            //        闭包创建时复制 final 数组（值类型），避免与 withTaskGroup 内部的 var 共享引用
-            let finalApps = updated
+    /// 异步请求 App 图标。
+    /// - 命中缓存：同步回调返回（同时更新 LRU 顺序）
+    /// - 未命中 + 首次请求：后台线程加载 + 缓存（带 LRU 淘汰） + 回调
+    /// - 未命中 + 正在加载中：将 completion 追加到等待队列，加载完成后统一回调
+    func requestIcon(for app: SystemApp, completion: @escaping @MainActor (NSImage?) -> Void) {
+        let path = app.path
+        if let cached = iconCache[path] {
+            // P2-图标LRU: 命中缓存，更新 LRU 顺序
+            promoteIconCacheKey(path)
+            completion(cached)
+            return
+        }
+        if iconLoadingSet.contains(path) {
+            // 修复竞态：同一图标正在加载中，将 completion 追加到等待队列
+            iconPendingCompletions[path, default: []].append(completion)
+            return
+        }
+        iconLoadingSet.insert(path)
+        // 首次请求也加入等待队列
+        iconPendingCompletions[path, default: []].append(completion)
+
+        Task.detached(priority: .utility) {
+            // Swift 6: Task.detached 闭包不能捕获 @MainActor 的 self
+            // 先在闭包外捕获需要的值，闭包内只使用这些值
+            let icon = Self.loadIconSync(at: path)
             await MainActor.run { [weak self] in
-                self?.installedApps = finalApps
-                self?.filteredApps = finalApps
+                guard let self = self else { return }
+                self.iconLoadingSet.remove(path)
+                if let icon = icon {
+                    self.insertIconCache(path: path, icon: icon)
+                }
+                // 回调所有等待者（包括首次请求和竞态追加的）
+                let completions = self.iconPendingCompletions.removeValue(forKey: path) ?? []
+                for callback in completions {
+                    callback(icon)
+                }
             }
         }
     }
 
-    // RT38: 后台加载图标
-    // nonisolated: NSWorkspace.shared.icon(forFile:) 线程安全，无需 @MainActor，
-    // 避免每次调用都调度回主线程增加负担
-    nonisolated private static func loadIconAsync(at path: String) -> NSImage? {
-        let icon = NSWorkspace.shared.icon(forFile: path)
-        icon.size = NSSize(width: 32, height: 32)
-        return icon
+    /// P2-图标LRU: 插入图标到缓存，超出上限时淘汰最旧的
+    private func insertIconCache(path: String, icon: NSImage) {
+        // 已存在则仅更新顺序（理论上不会发生——命中缓存会提前 return）
+        if iconCache[path] != nil {
+            promoteIconCacheKey(path)
+            return
+        }
+        iconCache[path] = icon
+        iconCacheOrder.append(path)
+        // 超出上限：淘汰最旧一半（30 条）
+        if iconCacheOrder.count > iconCacheMaxSize {
+            let removeCount = iconCacheOrder.count - iconCacheMaxSize + (iconCacheMaxSize / 2)
+            let toRemove = iconCacheOrder.prefix(removeCount)
+            for key in toRemove {
+                iconCache.removeValue(forKey: key)
+            }
+            iconCacheOrder.removeFirst(removeCount)
+        }
+    }
+
+    /// P2-图标LRU: 命中缓存时把 key 移到末尾（标记最近使用）
+    private func promoteIconCacheKey(_ key: String) {
+        if let index = iconCacheOrder.firstIndex(of: key) {
+            iconCacheOrder.remove(at: index)
+            iconCacheOrder.append(key)
+        }
+    }
+
+    /// 同步加载图标（M3: 限制为单一目标尺寸的 NSImage，内存占用最优）
+    /// 旧实现 `NSWorkspace.shared.icon(forFile:)` 返回的 NSImage 包含 16/32/128/256/512/1024 等多尺寸 representation，
+    /// 单图实际内存 50-200KB。新实现只保留 24×24 单一表示，单图 ~10-20KB。
+    /// 实现思路：用 CGImageSource 取最大尺寸 → CGImage → 缩放到 24x24 → 包成 NSImage
+    nonisolated private static func loadIconSync(at path: String) -> NSImage? {
+        let targetSize = NSSize(width: 24, height: 24)
+        // R-M3-rev: macOS 26 SDK 下 `bestRepresentation(for:context:hints:)` 签名变更，
+        // 改用 CGImageSource 直接解码 → 单一 CGImage → NSImage，绕开 NSImage 内部 representations 缓存
+        let url = URL(fileURLWithPath: path) as CFURL
+        if let source = CGImageSourceCreateWithURL(url, nil),
+           let fullImage = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            // 缩放到 24x24——单 CGImage，NSImage 只持一份 representation
+            let width = Int(targetSize.width)
+            let height = Int(targetSize.height)
+            if let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            ) {
+                context.interpolationQuality = .high
+                context.draw(fullImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+                if let scaledCGImage = context.makeImage() {
+                    return NSImage(cgImage: scaledCGImage, size: targetSize)
+                }
+            }
+            return NSImage(cgImage: fullImage, size: targetSize)
+        }
+        // 兜底：NSWorkspace API 在 macOS 各版本稳定，但可能保留多 representations
+        return NSWorkspace.shared.icon(forFile: path)
     }
 
     // R-218: 改为 static nonisolated + 返回值——目录扫描脱离 MainActor，
@@ -236,15 +289,5 @@ class AppManager: ObservableObject {
                 app.bundleIdentifier.localizedCaseInsensitiveContains(searchText)
             }
         }
-    }
-    
-    func getIconData(for app: SystemApp) -> Data? {
-        guard let icon = app.icon else { return nil }
-        if let tiffData = icon.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiffData),
-           let pngData = bitmap.representation(using: .png, properties: [:]) {
-            return pngData
-        }
-        return nil
     }
 }

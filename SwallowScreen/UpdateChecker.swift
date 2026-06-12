@@ -41,7 +41,16 @@ final class UpdateChecker {
     private let session: URLSession
     private var task: URLSessionDataTask?
 
-    private init(session: URLSession = .shared) {
+    // P3: 改用 ephemeral 配置——禁用磁盘缓存，减少内存占用
+    // URLSession.shared 默认配置会缓存响应数据到磁盘和内存
+    private static let ephemeralSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        return URLSession(configuration: config)
+    }()
+
+    private init(session: URLSession = ephemeralSession) {
         self.session = session
     }
 

@@ -192,4 +192,8 @@ class ScreenManager: ObservableObject {
 
 extension Notification.Name {
     static let screenConfigurationChanged = Notification.Name("screenConfigurationChanged")
+    // AXObserver 内部桥接通知：C 回调无法直接访问 @MainActor，通过 NotificationCenter 桥接
+    static let axWindowCreatedInternal = Notification.Name("axWindowCreatedInternal")
+    // pinToScreen 窗口移动事件桥接通知
+    static let axWindowMovedInternal = Notification.Name("axWindowMovedInternal")
 }
