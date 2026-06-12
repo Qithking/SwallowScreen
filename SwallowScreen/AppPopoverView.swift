@@ -308,9 +308,11 @@ struct AppPopoverView: View {
                let screen = screenManager.screens.first(where: { $0.id == screenID }) {
                 return screen
             }
-            // 3. 通过 name 精确匹配（不再用 displayName，displayName 含"主屏幕 ()"前缀不稳定）
+            // 3. 通过 name 匹配——走 screenManager.screen(name:) 统一入口
+            //        R-228: screen(name:) 内含旧版分辨率后缀兼容逻辑（如 "DELL U2720Q (2560x1440)"），
+            //        此处之前用 $0.name == screenName 精确匹配，旧版 targetScreenName 会匹配失败
             if let screenName = appInfo.targetScreenName {
-                return screenManager.screens.first { $0.name == screenName }
+                return screenManager.screen(name: screenName)
             }
         }
         return nil
@@ -323,6 +325,14 @@ struct AppPopoverView: View {
                 screenName: screen?.name,
                 screenSerialNumber: screen?.serialNumber
             )
+            // R-226: 选屏 ↔ isEnabled 双向同步——与 AppDelegate.setCurrentAppScreen/clearCurrentAppScreen 对齐
+            //        选 nil 屏（"不指定"）= 无目标屏幕 = isEnabled=false，避免定时器空转
+            //        选非 nil 屏 = 有目标屏幕 = isEnabled=true，恢复屏幕规则
+            if screen != nil && !existingInfo.isEnabled {
+                existingInfo.isEnabled = true
+            } else if screen == nil && existingInfo.isEnabled && !existingInfo.pinToScreen {
+                existingInfo.isEnabled = false
+            }
         } else {
             let newInfo = AppInfo(
                 bundleIdentifier: app.bundleIdentifier,
@@ -371,6 +381,15 @@ struct AppPopoverView: View {
                 return
             }
             existingInfo.updatePinToScreen(pinned)
+            // R-226: 关闭 pin 时同步禁用规则——pin 关闭后无持续监控需求，
+            //        但若仍有目标屏幕则保留 isEnabled（下次启动仍搬动），
+            //        仅在无目标屏幕时才禁用
+            if !pinned && existingInfo.isEnabled
+                && existingInfo.targetScreenID == nil
+                && existingInfo.targetScreenSerialNumber == nil
+                && existingInfo.targetScreenName == nil {
+                existingInfo.isEnabled = false
+            }
         } else {
             // R-217: 新建时同样校验——无 targetScreen 的新 App 不能直接启用 pin
             if pinned {
@@ -443,7 +462,9 @@ struct AppPopoverView: View {
     // R-211: 删除闭包 [weak self]——AppPopoverView 是 struct，weak 不适用；
     //        struct 按值捕获，无 retain cycle 风险
     private func autoCheckForUpdate() {
+        guard !isCheckingUpdate else { return }
         isCheckingUpdate = true
+        updateStatus = .checking
         UpdateChecker.shared.check { result in
             isCheckingUpdate = false
             switch result {
@@ -452,8 +473,10 @@ struct AppPopoverView: View {
                 downloadURL = info.downloadURL
                 updateStatus = .available
                 showUpdateAlert = true
-            case .failure, .success:
-                break
+            case .failure:
+                updateStatus = .error
+            case .success:
+                updateStatus = .upToDate
             }
         }
     }
@@ -461,6 +484,7 @@ struct AppPopoverView: View {
     // 手动检查更新（按钮调用）
     // R-211: 删除 [weak self]——AppPopoverView 是 struct，weak 不适用
     private func checkForUpdate() {
+        guard !isCheckingUpdate else { return }
         isCheckingUpdate = true
         updateStatus = .checking
 

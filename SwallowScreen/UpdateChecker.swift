@@ -86,10 +86,14 @@ final class UpdateChecker {
             // RT122: 用 Foundation 数值化字符串比较（1.2.10 > 1.2.9）；原字符串相等比较会误判
             let hasUpdate = raw.compare(Self.currentVersion, options: .numeric) == .orderedDescending
             let downloadURL: String
-            if let assets = json["assets"] as? [[String: Any]],
-               let firstAsset = assets.first,
-               let url = firstAsset["browser_download_url"] as? String {
-                downloadURL = url
+            if let assets = json["assets"] as? [[String: Any]] {
+                // 优先匹配 .dmg / .zip 安装包，避免取到 .sha256 校验文件或源码 tarball
+                let installExtensions = [".dmg", ".zip"]
+                let matchedAsset = assets.first(where: { asset in
+                    guard let url = asset["browser_download_url"] as? String else { return false }
+                    return installExtensions.contains(where: { url.hasSuffix($0) })
+                }) ?? assets.first
+                downloadURL = (matchedAsset?["browser_download_url"] as? String) ?? ""
             } else {
                 downloadURL = ""
             }

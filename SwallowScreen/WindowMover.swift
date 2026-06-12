@@ -766,12 +766,14 @@ class WindowMover: ObservableObject {
         if isPerformingInitialMove { return }
 
         // T18: 指纹 = 启用的 app 数量 + 标识 + 关键配置（id, pinToScreen, targetScreenID, targetScreenSerialNumber）
-        // R-215: 指纹只用于"配置变更感知"——配置未变时也要执行下方的 checkWindowPosition 循环
-        //        因为窗口位置变化（用户拖拽）不改变 fingerprint，但 pinToScreen 持续执行需要 position 校验
-        //        修复前：fingerprint 不变 → 早返回 → 用户拖开 pinned 窗口永远不被纠回（核心功能破坏）
-        let fingerprint = computeAppsFingerprint(allApps)
-        if fingerprint != lastAppsFingerprint {
-            lastAppsFingerprint = fingerprint
+        // 短路优化：没有任何 App 开启 pinToScreen 时，不需要进入 checkWindowPosition 循环
+        // （普通设置目标屏幕的 App 只在启动时移动一次，不在定时轮询中检查）
+        // 有 pinToScreen App 时仍需逐个检查窗口位置（因为用户拖拽不改变指纹）
+        let hasPinnedApps = allApps.contains(where: { $0.pinToScreen })
+        if !hasPinnedApps {
+            // 无 pinToScreen App 时仅更新指纹，跳过位置检查
+            lastAppsFingerprint = computeAppsFingerprint(allApps)
+            return
         }
 
         // 获取当前所有屏幕信息
@@ -950,11 +952,24 @@ class WindowMover: ObservableObject {
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty else { return nil }
 
-        // RT6: 仅做精确匹配 + 标准化匹配（trim + caseInsensitive）
+        // RT6: 精确匹配 + 标准化匹配（trim + caseInsensitive）
         if let exact = currentScreens.first(where: {
             $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(normalizedName) == .orderedSame
         }) {
             return exact.frame
+        }
+        // R-228: 兼容旧版本——旧版存储的 targetScreenName 可能含分辨率后缀
+        //        （如 "DELL U2720Q (2560x1440)"），R-222 后 name 仅 localizedName
+        //        与 ScreenManager.screen(name:) 保持一致的兼容逻辑
+        for screen in currentScreens {
+            let screenName = screen.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !screenName.isEmpty && normalizedName.caseInsensitiveCompare(screenName) != .orderedSame
+                && normalizedName.hasPrefix(screenName) {
+                let suffix = normalizedName.dropFirst(screenName.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                if suffix.hasPrefix("(") || suffix.first?.isNumber == true {
+                    return screen.frame
+                }
+            }
         }
         // RT42: 匹配失败时输出 debug 日志
         let candidates = currentScreens.map { $0.name }.joined(separator: " | ")
@@ -1007,11 +1022,12 @@ class WindowMover: ObservableObject {
             var axPosition = CGPoint.zero
             AXValueGetValue(posVal as! AXValue, .cgPoint, &axPosition)
 
-            // R-182: windowID 改用位置-based key——AXUIElement 每次 AXUIElementCopyAttributeValue(kAXWindowsAttribute)
-            //        都创建新 wrapper 对象，hashValue / ObjectIdentifier 跨调用不稳定，
-            //        导致 lastMovedWindows 5s 冷却完全失效。
-            //        用位置拼 key——同位置稳定（同一次/不同次 check 都不变），5s 冷却跨调用稳定生效
-            let windowID = "\(pid)-\(Int(axPosition.x))-\(Int(axPosition.y))"
+            // 稳定窗口标识：pid + title + role——跨移动稳定（不像坐标随移动变化）
+            // AXUIElement 每次获取都是新 wrapper，hashValue/ObjectIdentifier 跨调用不稳定，
+            // 但 kAXTitleAttribute + kAXRoleAttribute 在窗口生命周期内稳定
+            let windowTitle = copyAXString(window, attribute: kAXTitleAttribute as CFString) ?? ""
+            let windowRole = copyAXString(window, attribute: kAXRoleAttribute as CFString) ?? ""
+            let windowID = "\(pid)-\(windowTitle)-\(windowRole)"
 
             // 如果窗口位置变化很小，跳过（使用容差处理浮点数精度问题）
             if let prev = previousWindowPositions[windowID],
@@ -1052,6 +1068,14 @@ class WindowMover: ObservableObject {
             movingWindows.insert(windowID)
             moveWindowToScreenCenter(window, targetFrame: targetFrame, windowID: windowID)
         }
+    }
+
+    /// 读取 AX 字符串属性辅助方法（用于生成稳定的窗口标识）
+    private func copyAXString(_ window: AXUIElement, attribute: CFString) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, attribute, &value) == .success,
+              let str = value as? String else { return nil }
+        return str
     }
 
     /// 读取窗口 size 辅助方法

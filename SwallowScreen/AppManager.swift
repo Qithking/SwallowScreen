@@ -99,7 +99,7 @@ class AppManager: ObservableObject {
                     nextIndex += 1
                     inFlight += 1
                     group.addTask {
-                        let icon = await AppManager.loadIconAsync(at: appPath)
+                        let icon = AppManager.loadIconAsync(at: appPath)
                         return (idx, icon)
                     }
                 }
@@ -132,7 +132,7 @@ class AppManager: ObservableObject {
                         nextIndex += 1
                         inFlight += 1
                         group.addTask {
-                            let icon = await AppManager.loadIconAsync(at: appPath)
+                            let icon = AppManager.loadIconAsync(at: appPath)
                             return (newIdx, icon)
                         }
                     }
@@ -149,10 +149,10 @@ class AppManager: ObservableObject {
         }
     }
 
-    // RT38: 后台 actor 加载图标
-    // R-158: 去掉内层 Task.detached——外层调用方（loadInstalledApps）已在 Task.detached(utility) 中，
-    //        函数本身被 await 调用即可让出主线程。保留 async 签名便于外部 await
-    @MainActor private static func loadIconAsync(at path: String) -> NSImage? {
+    // RT38: 后台加载图标
+    // nonisolated: NSWorkspace.shared.icon(forFile:) 线程安全，无需 @MainActor，
+    // 避免每次调用都调度回主线程增加负担
+    nonisolated private static func loadIconAsync(at path: String) -> NSImage? {
         let icon = NSWorkspace.shared.icon(forFile: path)
         icon.size = NSSize(width: 32, height: 32)
         return icon

@@ -106,6 +106,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// T19: 关键错误弹 NSAlert 告知用户，不再只 print 一行
+    // R-227: 始终用 beginSheetModal / 非阻塞 show——runModal() 会阻塞主线程，
+    //        导致窗口监控暂停（与 showSaveErrorAlert 的 R-154 修复同理）
     private func showCriticalAlert(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -115,6 +117,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let window = NSApp.keyWindow {
             alert.beginSheetModal(for: window, completionHandler: nil)
         } else {
+            // R-227: 无 keyWindow 时只能用 runModal()——NSAlert 没有 show() 方法
+            //        beginSheetModal 需要关联 window；runModal() 虽然阻塞 RunLoop，
+            //        但此路径仅在 keyWindow 为 nil 时触发（启动期/权限未授予），影响有限
             alert.runModal()
         }
     }
@@ -161,10 +166,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func initializePopover() {
         guard let container = modelContainer else {
             setupModelContainer()
-            guard let container = modelContainer else {
+            guard modelContainer != nil else {
                 return
             }
-            setupPopoverWithContainer(container)
+            setupPopoverWithContainer(modelContainer!)
             return
         }
         
@@ -516,13 +521,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // RT41: 通用 SwiftData save 错误反馈
     // R-157: 改为 internal（默认）——AppPopoverView.updatePinToScreen 路径也要用
+    // R-227: runModal() fallback 同步改为非阻塞——与 showCriticalAlert 保持一致
     static func showSaveErrorAlert(error: Error) {
         let alert = NSAlert()
         alert.messageText = "无法保存配置"
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.addButton(withTitle: "确定")
-        alert.runModal()
+        if let window = NSApp.keyWindow {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            // R-227: 无 keyWindow 时只能用 runModal()——NSAlert 没有 show() 方法
+            alert.runModal()
+        }
     }
 
     // MARK: - 设置窗口
@@ -686,18 +697,20 @@ extension AppDelegate {
     }
 
     /// R-154: 取消 pending 防抖并立即同步写一次
+    // R-221: 不再检查 window == settingsWindow——windowWillClose 已把 settingsWindow 置 nil，
+    //        但 frame 写入不应依赖此引用；applicationWillTerminate 中调用时窗口可能已 close
     private func flushPendingFrameSave(window: NSWindow) {
         saveFrameWorkItem?.cancel()
         saveFrameWorkItem = nil
-        if window == settingsWindow {
-            writeSettingsWindowFrame(window: window)
-        }
+        writeSettingsWindowFrame(window: window)
     }
 
     /// R-154: 实际写盘（防抖落地点 / 立即写共用）
+    // R-221: 仅检查窗口有效性（frame > 0），不再依赖 settingsWindow 引用——
+    //        windowWillClose 中 settingsWindow 已被置 nil，但 frame 仍应写入
     private func writeSettingsWindowFrame(window: NSWindow) {
-        guard window == settingsWindow else { return }
         let frame = window.frame
+        guard frame.width > 0 && frame.height > 0 else { return }
         UserDefaults.standard.set(NSStringFromRect(frame), forKey: Self.settingsWindowFrameKey)
     }
 }

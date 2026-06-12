@@ -204,6 +204,8 @@ struct HotkeySettingsView: View {
     @State private var recordingDeadline: Date = .distantPast
     // RT71: 改 DispatchSourceTimer，与 RT59/RT64 风格一致；不被主 RunLoop tracking mode 阻塞
     @State private var recordingTimeoutTimer: DispatchSourceTimer?
+    // 加载设置期间的标志，防止 onChange 在 loadSettings 时误触发 saveHotkey
+    @State private var isLoadingSettings: Bool = false
     
     enum ModifierKey: String, CaseIterable, Hashable {
         case command = "⌘"
@@ -239,8 +241,8 @@ struct HotkeySettingsView: View {
                     isRecording: recordingHotkey == .setScreen,
                     onStartRecording: { recordingHotkey = .setScreen }
                 )
-                .onChange(of: setScreenModifiers) { _, _ in saveHotkey(.setScreen) }
-                .onChange(of: setScreenKeyCode) { _, _ in saveHotkey(.setScreen) }
+                .onChange(of: setScreenModifiers) { _, _ in if !isLoadingSettings { saveHotkey(.setScreen) } }
+                .onChange(of: setScreenKeyCode) { _, _ in if !isLoadingSettings { saveHotkey(.setScreen) } }
                 
                 // 取消前台应用屏幕设置
                 HotkeyCard(
@@ -251,8 +253,8 @@ struct HotkeySettingsView: View {
                     isRecording: recordingHotkey == .clearScreen,
                     onStartRecording: { recordingHotkey = .clearScreen }
                 )
-                .onChange(of: clearScreenModifiers) { _, _ in saveHotkey(.clearScreen) }
-                .onChange(of: clearScreenKeyCode) { _, _ in saveHotkey(.clearScreen) }
+                .onChange(of: clearScreenModifiers) { _, _ in if !isLoadingSettings { saveHotkey(.clearScreen) } }
+                .onChange(of: clearScreenKeyCode) { _, _ in if !isLoadingSettings { saveHotkey(.clearScreen) } }
             }
             .padding(20)
         }
@@ -331,6 +333,18 @@ struct HotkeySettingsView: View {
                 return nil
             }
 
+            // 拒绝纯修饰键组合（keyCode 本身是修饰键而非普通键）
+            let modifierKeyCodes: Set<UInt32> = [
+                0x38, 0x3C, // Shift, ShiftR
+                0x3B, 0x3E, // Ctrl, CtrlR
+                0x37, 0x36, // Cmd, CmdR
+                0x3A, 0x3D  // Opt, OptR
+            ]
+            if modifierKeyCodes.contains(keyCode) {
+                // 吞掉但不更新快捷键
+                return nil
+            }
+
             // 正常录制：更新快捷键并退出
             self.setRecordedHotkey(keyCode: keyCode, flags: flags)
             self.recordingHotkey = nil
@@ -346,6 +360,8 @@ struct HotkeySettingsView: View {
     }
     
     private func loadSettings() {
+        isLoadingSettings = true
+        defer { isLoadingSettings = false }
         if let settings = appSettings.first {
             setScreenKeyCode = UInt32(settings.setScreenKeyCode)
             clearScreenKeyCode = UInt32(settings.clearScreenKeyCode)

@@ -12,18 +12,29 @@ import CoreGraphics
 
 struct ScreenInfo: Identifiable, Hashable {
     let id: UInt32  // CGDirectDisplayID
+    // R-222: name 仅存 screen.localizedName，不含分辨率后缀——
+    //        分辨率会随设置变化，导致 targetScreenName 匹配失败；
+    //        分辨率信息移到 displayName 中仅用于 UI 展示
     let name: String
     // R-159: 本字段为兼容历史保留，存的是 screen.frame（含菜单栏/Dock 区域）；
     //        判断屏幕包含关系请用 screen.visibleFrame（见 ScreenManager.screen(containing:)）
     let frame: CGRect
     let isMain: Bool
     let serialNumber: String?  // 屏幕序列号，用于跨重启识别
+    // R-222: 分辨率后缀独立存储，仅用于 UI 展示
+    let resolutionSuffix: String?
     
     var displayName: String {
+        var base: String
         if isMain {
-            return "主屏幕 (\(name))"
+            base = "主屏幕 (\(name))"
+        } else {
+            base = name
         }
-        return name
+        if let suffix = resolutionSuffix {
+            return "\(base) \(suffix)"
+        }
+        return base
     }
 }
 
@@ -56,9 +67,28 @@ class ScreenManager: ObservableObject {
 
     func screen(name: String) -> ScreenInfo? {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return screens.first {
+        // R-228: 精确匹配——优先匹配 ScreenInfo.name（仅 localizedName，R-222 后不含分辨率）
+        if let exact = screens.first(where: {
             $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(normalized) == .orderedSame
+        }) {
+            return exact
         }
+        // R-228: 兼容旧版本——旧版存储的 targetScreenName 可能含分辨率后缀
+        //        （如 "DELL U2720Q (2560x1440)"），R-222 后 name 仅 localizedName
+        //        遍历所有屏，检查 normalized 是否以某个 screen.name 开头
+        //        （分辨率后缀格式为 " (WxH)"，空格+括号分隔）
+        for screen in screens {
+            let screenName = screen.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !screenName.isEmpty && normalized.caseInsensitiveCompare(screenName) != .orderedSame
+                && normalized.hasPrefix(screenName) {
+                // 剩余部分应是分辨率后缀，格式 " (WxH)" 或 " WxH"
+                let suffix = normalized.dropFirst(screenName.count).trimmingCharacters(in: .whitespacesAndNewlines)
+                if suffix.hasPrefix("(") || suffix.first?.isNumber == true {
+                    return screen
+                }
+            }
+        }
+        return nil
     }
 
     /// RT7: 与 WindowMover.getScreenContainingPoint 统一用 visibleFrame
@@ -74,7 +104,8 @@ class ScreenManager: ObservableObject {
                     name: screen.localizedName,
                     frame: screen.frame,
                     isMain: screen == NSScreen.main,
-                    serialNumber: ScreenManager.serialNumber(for: screen)
+                    serialNumber: ScreenManager.serialNumber(for: screen),
+                    resolutionSuffix: nil  // 兜底构造，不含分辨率后缀
                 )
             }
         }
@@ -93,17 +124,20 @@ class ScreenManager: ObservableObject {
             let serialNumber = ScreenManager.serialNumber(for: screen)
             
             // 获取屏幕名称
+            // R-222: name 仅存 localizedName（稳定，不随分辨率变化）；
+            //        分辨率后缀存到 resolutionSuffix（仅用于 UI 展示）
             var screenName = "屏幕 \(index + 1)"
             let name = screen.localizedName
             if !name.isEmpty {
                 screenName = name
             }
             
-            // 如果是 Retina 屏幕或外接显示器，添加分辨率信息
+            // 如果是 Retina 屏幕或外接显示器，生成分辨率后缀
+            var resolutionSuffix: String? = nil
             if screen.backingScaleFactor > 1.0 && NSScreen.screens.count > 1 {
                 let resolution = "\(Int(frame.width))x\(Int(frame.height))"
                 if !screenName.contains(resolution) {
-                    screenName = "\(screenName) \(resolution)"
+                    resolutionSuffix = resolution
                 }
             }
             
@@ -112,7 +146,8 @@ class ScreenManager: ObservableObject {
                 name: screenName,
                 frame: frame,
                 isMain: isMain,
-                serialNumber: serialNumber
+                serialNumber: serialNumber,
+                resolutionSuffix: resolutionSuffix
             )
             screenList.append(info)
         }

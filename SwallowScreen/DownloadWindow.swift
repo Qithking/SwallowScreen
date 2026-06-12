@@ -208,32 +208,32 @@ struct DownloadWindowContentView: View {
             //        [weak self] 不适用（weak 只能用于 class/class-bound protocol），
             //        也无 retain cycle 风险（struct 按值捕获）
             //        原代码触发 3x `weak may only be applied to class types` + 3x `self never mutated`
+            // R-223: DownloadManager delegate 已通过 Task @MainActor 派发回主线程，
+            //        回调闭包已在主线程上执行，无需再 DispatchQueue.main.async 二次派发
             onProgress: { progress in
-                // RT45: 显式主线程派发（防御 URLSession 路径变更）
-                DispatchQueue.main.async {
-                    self.downloadProgress = progress
-                }
+                self.downloadProgress = progress
             },
             onComplete: { localURL in
-                // RT49: Task @MainActor 替代 asyncAfter
+                if let url = localURL {
+                    NSWorkspace.shared.open(url)
+                }
                 Task { @MainActor in
-                    if let url = localURL {
-                        NSWorkspace.shared.open(url)
-                    }
                     try? await Task.sleep(nanoseconds: 500_000_000)
                     self.closeWindow()
                 }
             },
             onError: { error in
-                DispatchQueue.main.async {
-                    self.downloadStatus = .failed
-                    self.errorMessage = error
-                }
+                self.downloadStatus = .failed
+                self.errorMessage = error
             }
         )
     }
 
     private func cancelDownload() {
+        // R-230: 标记为 failed 防止 didCompleteWithError 异步回调到达后修改 UI 状态
+        //        （cancel() 删除 callbacks，didCompleteWithError 找到 nil 后直接 return——
+        //        但时间窗口内 onError 可能在 callbacks 删除前被派发）
+        downloadStatus = .failed
         DownloadManager.shared.cancel(urlKey: downloadURL.absoluteString)
         closeWindow()
     }
@@ -279,16 +279,16 @@ private struct WindowAccessor: NSViewRepresentable {
 
 // MARK: - 下载管理器
 // T15: 改为按 URL 串行化；同 URL 多次下载会取消旧 task
-// R-212: 删除 @MainActor——URLSessionDelegate 方法在后台线程调用，
-//        与 @MainActor 隔离冲突（Swift 6 error: conformance crosses into main actor-isolated code）
+// R-220: 恢复 @MainActor——activeTasks/callbacks 的读写必须串行化，
+//        delegateQueue: .main 不保证所有 delegate 回调在主线程（如 urlSessionDidFinishEvents
+//        forBackgroundURLSession 可能在后台线程）；assert 在 Release 中被移除无法保护。
+//        delegate 方法标 nonisolated + MainActor.run 派发，解决 Swift 6 strict concurrency
+@MainActor
 class DownloadManager: NSObject, URLSessionDownloadDelegate {
     static let shared = DownloadManager()
 
     private let log = OSLog(subsystem: "com.swallowscreen.SwallowScreen", category: "DownloadManager")
     private var session: URLSession?
-    // R-212: @MainActor 已删除，但 activeTasks/callbacks 只在主线程访问，
-    //        用 NSLock 保护以兼容 Swift 6 strict concurrency
-    private let lock = NSLock()
     private var activeTasks: [String: URLSessionDownloadTask] = [:] // urlKey -> task
     private var callbacks: [String: TaskCallbacks] = [:]
 
@@ -303,8 +303,6 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
                   onProgress: @escaping (Double) -> Void,
                   onComplete: @escaping (URL?) -> Void,
                   onError: @escaping (String) -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
         // 同 URL 已经有下载在进行，先取消旧 task 避免互相覆盖回调
         if let existing = activeTasks[urlKey] {
             existing.cancel()
@@ -334,8 +332,6 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     func cancel(urlKey: String) {
-        lock.lock()
-        defer { lock.unlock() }
         if let task = activeTasks[urlKey] {
             task.cancel()
         }
@@ -344,89 +340,97 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     // MARK: - URLSessionDownloadDelegate
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        // T19: 避免 force unwrap
+    // R-220: 全部标 nonisolated，内部用 MainActor.run 派发回主线程——
+    //        解决 @MainActor conformance 与 URLSession 后台回调的冲突
+
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let urlKey = downloadTask.taskDescription else { return }
         let fileManager = FileManager.default
-        guard let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            // RT45: 主线程派发
-            DispatchQueue.main.async { [weak self] in
-                self?.lock.lock()
-                self?.callbacks[urlKey]?.onError("找不到 Documents 目录")
-                self?.lock.unlock()
+        // 使用临时目录而非 Documents——下载的安装包是一次性的，不需要持久保存
+        let tempDir = fileManager.temporaryDirectory.appendingPathComponent("SwallowScreenUpdates", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        } catch {
+            Task { @MainActor [weak self] in
+                self?.callbacks[urlKey]?.onError("无法创建临时目录：\(error.localizedDescription)")
+                self?.callbacks[urlKey] = nil
+                self?.activeTasks[urlKey] = nil
             }
             return
         }
 
         let fileName = downloadTask.response?.suggestedFilename ?? location.lastPathComponent
-        let destinationURL = documentsURL.appendingPathComponent(fileName)
+        let destinationURL = tempDir.appendingPathComponent(fileName)
 
         try? fileManager.removeItem(at: destinationURL)
 
         // R-199: 移到后台线程执行 fileManager.copyItem——>100MB 文件不再阻塞主线程
-        //        URLSession delegateQueue: .main 时主线程会同步等 copyItem 完成
         let locationCopy = location
         let urlKeyCapture = urlKey
-        Task.detached(priority: .utility) { [weak self] in
+        Task.detached(priority: .utility) {
             do {
                 try FileManager.default.copyItem(at: locationCopy, to: destinationURL)
+                // 清理之前的旧更新下载文件（保留当前文件）
+                if let contents = try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                    for file in contents where file != destinationURL {
+                        try? FileManager.default.removeItem(at: file)
+                    }
+                }
+                // R-225: 集中到同一个 MainActor.run——onComplete + callbacks 清理 + activeTasks 清理
+                //        原代码用两个独立 Task @MainActor 清理 activeTasks，与 didCompleteWithError
+                //        中的 callbacks 清理存在数据竞态：两个 Task 执行顺序不确定，
+                //        可能先 activeTasks=nil → 后 callbacks 清理时 onComplete 已调用但
+                //        didCompleteWithError 也尝试 onError 同一 urlKey
+                //        集中清理后，onComplete 和 callbacks 清理在同一 MainActor.run 内原子完成
                 await MainActor.run { [weak self] in
-                    self?.lock.lock()
                     self?.callbacks[urlKeyCapture]?.onComplete(destinationURL)
                     self?.callbacks[urlKeyCapture] = nil
-                    self?.lock.unlock()
+                    self?.activeTasks[urlKeyCapture] = nil
                 }
             } catch {
-                os_log("保存下载文件失败: %{public}@", log: self?.log ?? OSLog.default, type: .error, error.localizedDescription)
+                os_log("保存下载文件失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
                 await MainActor.run { [weak self] in
-                    self?.lock.lock()
                     self?.callbacks[urlKeyCapture]?.onError("保存文件失败: \(error.localizedDescription)")
                     self?.callbacks[urlKeyCapture] = nil
-                    self?.lock.unlock()
+                    self?.activeTasks[urlKeyCapture] = nil
                 }
             }
         }
-
-        // R-199: activeTasks 清理在主线程上立即执行（callbacks 清理在 Task.detached 内的成功/失败路径上）
-        lock.lock()
-        activeTasks[urlKey] = nil
-        lock.unlock()
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let urlKey = downloadTask.taskDescription else { return }
         if totalBytesExpectedToWrite > 0 {
             let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-            DispatchQueue.main.async { [weak self] in
-                self?.lock.lock()
+            Task { @MainActor [weak self] in
                 self?.callbacks[urlKey]?.onProgress(progress)
-                self?.lock.unlock()
             }
         }
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let urlKey = task.taskDescription else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        defer { activeTasks[urlKey] = nil }
-        if let error = error {
-            if (error as NSError).code == NSURLErrorCancelled {
-                return
-            }
-            os_log("下载失败: %{public}@", log: log, type: .error, error.localizedDescription)
-            DispatchQueue.main.async { [weak self] in
-                self?.lock.lock()
+        Task { @MainActor [weak self] in
+            self?.activeTasks[urlKey] = nil
+            if let error = error {
+                if (error as NSError).code == NSURLErrorCancelled {
+                    return
+                }
+                // R-229: didFinishDownloadingTo 成功路径已在 R-225 MainActor.run 中清理
+                //        callbacks[urlKey] = nil；若此时 callbacks 为 nil，说明下载文件已
+                //        成功复制并回调 onComplete，此处不应再 onError——否则同一 urlKey
+                //        的 onComplete 和 onError 都被调用，UI 状态错乱
+                guard self?.callbacks[urlKey] != nil else { return }
+                os_log("下载失败: %{public}@", log: self?.log ?? OSLog.default, type: .error, error.localizedDescription)
                 self?.callbacks[urlKey]?.onError(error.localizedDescription)
                 self?.callbacks[urlKey] = nil
-                self?.lock.unlock()
             }
         }
     }
 
-    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+    nonisolated func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
         if let error = error {
-            os_log("URLSession 无效: %{public}@", log: log, type: .error, error.localizedDescription)
+            os_log("URLSession 无效: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
         }
     }
 }
