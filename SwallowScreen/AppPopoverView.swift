@@ -8,6 +8,7 @@
 import SwiftUI
 import SwiftData
 import AppKit
+import os.log
 
 struct AppPopoverView: View {
     @Environment(\.modelContext) private var modelContext
@@ -19,23 +20,16 @@ struct AppPopoverView: View {
     
     @State private var searchText = ""
     @State private var selectedAppForConfig: SystemApp?
-    
-    @State private var settings: AppSettings?
+
+    // R-155: 删除 @State settings 改用 appSettings.first——避免与 @Query appSettings 双数据源不一致
     @State private var showWelcomeTip: Bool = false
     
     // 检查更新相关状态
     @State private var isCheckingUpdate: Bool = false
-    @State private var updateStatus: UpdateStatus = .idle
+    // RT106: UpdateStatus 抽到 UpdateChecker 统一引用
+    @State private var updateStatus: UpdateChecker.UpdateStatus = .idle
     @State private var latestVersion: String = ""
     @State private var downloadURL: String = ""
-    
-    enum UpdateStatus {
-        case idle
-        case checking
-        case available
-        case upToDate
-        case error
-    }
     
     var body: some View {
         ZStack {
@@ -151,7 +145,8 @@ struct AppPopoverView: View {
     }
     
     private func checkWelcomeTip() {
-        if let settings = settings, settings.showHelpTips {
+        // R-155: 改用 appSettings.first（@Query 自动反映 SwiftData 变化）——不再依赖 setupSettings 设的 @State
+        if let settings = appSettings.first, settings.showHelpTips {
             showWelcomeTip = true
         }
     }
@@ -186,22 +181,37 @@ struct AppPopoverView: View {
     private var appListArea: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(appManager.filteredApps) { app in
-                    AppRowView(
-                        app: app,
-                        screens: screenManager.screens,
-                        selectedScreen: getSelectedScreen(for: app),
-                        isPinToScreen: getIsPinToScreen(for: app),
-                        isMenuBarApp: app.isMenuBarApp,
-                        onScreenSelected: { screenInfo in
-                            configureApp(app: app, screen: screenInfo)
-                        },
-                        onPinToScreenChanged: { pinned in
-                            updatePinToScreen(app: app, pinned: pinned)
+                // RT50: 扫描中显示 loading 占位
+                if appManager.installedApps.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            ProgressView().scaleEffect(0.7)
+                            Text("正在扫描应用...")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
-                    )
-                    
-                    Divider()
+                        Spacer()
+                    }
+                    .padding(.vertical, 24)
+                } else {
+                    ForEach(appManager.filteredApps) { app in
+                        AppRowView(
+                            app: app,
+                            screens: screenManager.screens,
+                            selectedScreen: getSelectedScreen(for: app),
+                            isPinToScreen: getIsPinToScreen(for: app),
+                            isMenuBarApp: app.isMenuBarApp,
+                            onScreenSelected: { screenInfo in
+                                configureApp(app: app, screen: screenInfo)
+                            },
+                            onPinToScreenChanged: { pinned in
+                                updatePinToScreen(app: app, pinned: pinned)
+                            }
+                        )
+
+                        Divider()
+                    }
                 }
             }
         }
@@ -266,10 +276,18 @@ struct AppPopoverView: View {
             if results.isEmpty {
                 let newSettings = AppSettings()
                 modelContext.insert(newSettings)
+                // R-191: 走 R-157 路径——失败时 os_log + 弹 NSAlert（与 updatePinToScreen 路径一致）
+                //        原 try? modelContext.save() 静默吞错，首次启动 settings 不持久化也无感知
+                do {
+                    try modelContext.save()
+                } catch {
+                    os_log("setupSettings save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
+                    AppDelegate.showSaveErrorAlert(error: error)
+                }
             }
-            settings = results.first
+            // R-155: 不再写 @State settings——appSettings.first 始终反映 @Query 自动结果
         } catch {
-            // 静默处理
+            os_log("setupSettings fetch 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
         }
     }
     
@@ -290,13 +308,9 @@ struct AppPopoverView: View {
                let screen = screenManager.screens.first(where: { $0.id == screenID }) {
                 return screen
             }
-            // 3. 通过名称匹配（解决重启后屏幕 ID 变化问题）
+            // 3. 通过 name 精确匹配（不再用 displayName，displayName 含"主屏幕 ()"前缀不稳定）
             if let screenName = appInfo.targetScreenName {
-                return screenManager.screens.first { screen in
-                    screen.displayName == screenName || 
-                    screen.name == screenName ||
-                    screen.displayName.contains(screenName.components(separatedBy: " ").first ?? "")
-                }
+                return screenManager.screens.first { $0.name == screenName }
             }
         }
         return nil
@@ -306,7 +320,7 @@ struct AppPopoverView: View {
         if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
             existingInfo.updateScreen(
                 screenID: screen?.id,
-                screenName: screen?.displayName,
+                screenName: screen?.name,
                 screenSerialNumber: screen?.serialNumber
             )
         } else {
@@ -315,14 +329,20 @@ struct AppPopoverView: View {
                 appName: app.name,
                 iconData: appManager.getIconData(for: app),
                 targetScreenID: screen?.id,
-                targetScreenName: screen?.displayName,
+                targetScreenName: screen?.name,
                 targetScreenSerialNumber: screen?.serialNumber
             )
             modelContext.insert(newInfo)
         }
-        
-        // 确保数据被保存
-        try? modelContext.save()
+
+        // R-192: 走 R-157 路径——失败时 os_log + 弹 NSAlert（与 updatePinToScreen 路径一致）
+        //        原 try? modelContext.save() 静默吞错，屏幕配置修改丢失也无感知
+        do {
+            try modelContext.save()
+        } catch {
+            os_log("configureApp save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
+            AppDelegate.showSaveErrorAlert(error: error)
+        }
     }
     
     private func getIsPinToScreen(for app: SystemApp) -> Bool {
@@ -334,8 +354,36 @@ struct AppPopoverView: View {
     
     private func updatePinToScreen(app: SystemApp, pinned: Bool) {
         if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+            // R-217: 启用 pin 时校验是否已配目标屏——无 targetScreen 的 pin 是 silent no-op
+            //        写库成功但 checkAndEnforcePinnedWindows 的 resolveTargetFrame 返回 nil → 静默跳过
+            //        此处显式拒绝，给用户告警
+            if pinned && existingInfo.targetScreenID == nil
+                && existingInfo.targetScreenSerialNumber == nil
+                && existingInfo.targetScreenName == nil {
+                let error = NSError(
+                    domain: "PinToScreen",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "请先为此应用选择屏幕，然后再启用固定屏幕"]
+                )
+                os_log("updatePinToScreen: bundleID=%{public}@ 尝试启用 pin 但无目标屏",
+                       log: OSLog.default, type: .error, app.bundleIdentifier)
+                AppDelegate.showSaveErrorAlert(error: error)
+                return
+            }
             existingInfo.updatePinToScreen(pinned)
         } else {
+            // R-217: 新建时同样校验——无 targetScreen 的新 App 不能直接启用 pin
+            if pinned {
+                let error = NSError(
+                    domain: "PinToScreen",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "请先为此应用选择屏幕，然后再启用固定屏幕"]
+                )
+                os_log("updatePinToScreen: bundleID=%{public}@ 新建 AppInfo 尝试启用 pin 但无目标屏",
+                       log: OSLog.default, type: .error, app.bundleIdentifier)
+                AppDelegate.showSaveErrorAlert(error: error)
+                return
+            }
             let newInfo = AppInfo(
                 bundleIdentifier: app.bundleIdentifier,
                 appName: app.name,
@@ -344,10 +392,15 @@ struct AppPopoverView: View {
             )
             modelContext.insert(newInfo)
         }
-        
-        // 确保数据被保存
-        try? modelContext.save()
-        
+
+        // R-157: 与 setCurrentAppScreen / clearCurrentAppScreen 路径一致——失败时弹 NSAlert
+        do {
+            try modelContext.save()
+        } catch {
+            os_log("updatePinToScreen save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
+            AppDelegate.showSaveErrorAlert(error: error)
+        }
+
         // 启用固定屏幕时，立即触发检查
         if pinned {
             NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
@@ -358,6 +411,11 @@ struct AppPopoverView: View {
         if let settings = appSettings.first {
             update(settings)
             settings.updatedAt = Date()
+            // R-189: 显式 save——SwiftData view context 自动 save 时机不确定，
+            //        进程崩溃时 `showHelpTips = false` 等设置修改丢失
+            //        （welcomeTipView "不再显示" 按钮调此闭包）
+            //        showHelpTips 修改不致命，try? 可接受
+            try? modelContext.save()
         }
     }
     
@@ -379,97 +437,56 @@ struct AppPopoverView: View {
         }
     }
     
-    // 自动检查更新（启动时调用）
+    // RT32: 自动检查更新（启动时调用）—— checkUpdateOnLaunch 判断收敛到 onAppear 入口
+    // R-188: 入口 isCheckingUpdate = true + 回调内 false——与 checkForUpdate 行为一致，
+    //        启动期检查更新时按钮 ProgressView 正常显示
+    // R-211: 删除闭包 [weak self]——AppPopoverView 是 struct，weak 不适用；
+    //        struct 按值捕获，无 retain cycle 风险
     private func autoCheckForUpdate() {
-        guard let url = URL(string: "https://api.github.com/repos/Qithking/SwallowScreen/releases/latest") else {
-            return
-        }
-        
-        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-        
-        URLSession.shared.dataTask(with: request) { [self] data, _, error in
-            guard let data = data, error == nil else { return }
-            
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let tagName = json["tag_name"] as? String {
-                let newVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
-                
-                if newVersion != currentVersion {
-                    DispatchQueue.main.async {
-                        self.latestVersion = newVersion
-                        if let assets = json["assets"] as? [[String: Any]],
-                           let firstAsset = assets.first,
-                           let downloadUrl = firstAsset["browser_download_url"] as? String {
-                            self.downloadURL = downloadUrl
-                            self.showUpdateAlert = true
-                        }
-                    }
-                }
+        isCheckingUpdate = true
+        UpdateChecker.shared.check { result in
+            isCheckingUpdate = false
+            switch result {
+            case .success(let info) where info.hasUpdate:
+                latestVersion = info.latestVersion
+                downloadURL = info.downloadURL
+                updateStatus = .available
+                showUpdateAlert = true
+            case .failure, .success:
+                break
             }
-        }.resume()
+        }
     }
-    
+
     // 手动检查更新（按钮调用）
+    // R-211: 删除 [weak self]——AppPopoverView 是 struct，weak 不适用
     private func checkForUpdate() {
         isCheckingUpdate = true
         updateStatus = .checking
-        
-        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
-        
-        guard let url = URL(string: "https://api.github.com/repos/Qithking/SwallowScreen/releases/latest") else {
-            updateStatus = .error
+
+        UpdateChecker.shared.check { result in
             isCheckingUpdate = false
-            return
-        }
-        
-        var request = URLRequest(url: url)
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
-        
-        URLSession.shared.dataTask(with: request) { [self] data, response, error in
-            DispatchQueue.main.async {
-                self.isCheckingUpdate = false
-                
-                guard let data = data, error == nil else {
-                    self.updateStatus = .error
-                    return
+            switch result {
+            case .success(let info):
+                latestVersion = info.latestVersion
+                if info.hasUpdate {
+                    updateStatus = .available
+                    downloadURL = info.downloadURL
+                    showUpdateAlert = true
+                } else {
+                    updateStatus = .upToDate
+                    showUpToDateAlert = true
                 }
-                
-                do {
-                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let tagName = json["tag_name"] as? String {
-                        self.latestVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
-                        
-                        if self.latestVersion == currentVersion {
-                            self.updateStatus = .upToDate
-                            self.showUpToDateAlert = true
-                        } else {
-                            self.updateStatus = .available
-                            if let assets = json["assets"] as? [[String: Any]],
-                               let firstAsset = assets.first,
-                               let browserDownloadURL = firstAsset["browser_download_url"] as? String {
-                                self.downloadURL = browserDownloadURL
-                                self.showUpdateAlert = true
-                            }
-                        }
-                    } else {
-                        self.updateStatus = .error
-                    }
-                } catch {
-                    self.updateStatus = .error
-                }
+            case .failure:
+                updateStatus = .error
             }
-        }.resume()
+        }
     }
     
     private func openDownloadWindow() {
         guard let url = URL(string: downloadURL) else { return }
-        let controller = DownloadWindowController(version: latestVersion, downloadURL: url)
-        controller.showWindow()
+        // RT70: 抽到 DownloadWindowController.open 静态方法
+        DownloadWindowController.open(version: latestVersion, downloadURL: url)
     }
 }
 
@@ -488,6 +505,7 @@ struct AppRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             // 固定屏幕图标
+            // R-217: 未选屏幕时禁用 pin 按钮——避免用户开启无 targetScreen 的 pin（silent no-op）
             Button(action: {
                 onPinToScreenChanged(!isPinToScreen)
             }) {
@@ -496,7 +514,10 @@ struct AppRowView: View {
                     .foregroundColor(isPinToScreen ? .green : .secondary)
             }
             .buttonStyle(.plain)
-            .help("固定屏幕：开启后该应用只能在此屏幕显示")
+            .disabled(selectedScreen == nil && !isPinToScreen)
+            .help(selectedScreen == nil && !isPinToScreen
+                  ? "请先选择屏幕，然后再启用固定屏幕"
+                  : "固定屏幕：开启后该应用只能在此屏幕显示")
             
             // 应用图标
             if let icon = app.icon {

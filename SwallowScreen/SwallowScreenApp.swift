@@ -11,11 +11,12 @@ import SwiftData
 @main
 struct SwallowScreenApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
+
     var body: some Scene {
-        // 不创建 WindowGroup，因为我们使用 Menu Bar App
+        // RT35: 占位 Settings scene 改为 EmptyView，避免 Cmd+, 弹出"SwallowScreen"空窗
+        // AppDelegate 自身处理菜单栏图标与自定义设置窗口
         Settings {
-            Text("SwallowScreen")
+            EmptyView()
         }
     }
 }

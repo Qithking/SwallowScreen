@@ -16,7 +16,8 @@ final class AppInfo {
     // 应用名称
     var appName: String
     
-    // 应用图标数据（存储为 Data）
+    // 应用图标数据（PNG 格式，固定 32x32，未压缩）
+    // 注：SwiftData 会将 Data 字段以二进制形式存到 SQLite，单图约几 KB；如需管理大型图标库，请改用文件存储
     var iconData: Data?
     
     // 指定的屏幕 ID（通过 CGDirectDisplayID 标识）
@@ -62,6 +63,10 @@ final class AppInfo {
     
     func updatePinToScreen(_ pinned: Bool) {
         self.pinToScreen = pinned
+        // T9: 开启 pin 时强制 isEnabled = true，确保 pin 监控路径不被整体跳过
+        if pinned && !isEnabled {
+            isEnabled = true
+        }
         self.updatedAt = Date()
     }
 }
