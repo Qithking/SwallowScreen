@@ -1197,12 +1197,13 @@ class WindowMover: ObservableObject {
         timer.resume()
     }
 
-    /// 判断窗口是否"在目标屏"：90% 面积在 visibleFrame 内
-    /// FIX-居中偏移: 旧逻辑"中心点 OR 50%面积"太宽松——窗口被拖到屏幕边缘时，
-    ///     中心点可能仍在目标屏内但窗口有小部分在屏外，导致不触发移动。
-    ///     改为 90% 面积阈值：窗口有超过 10% 在屏外时触发移动，确保窗口完全回到目标屏
+    /// 判断窗口是否"在目标屏"：窗口中心点在 targetFrame 内即视为在目标屏
+    /// FIX-自由移动: 改用中心点判定——只要窗口主体在正确屏幕上，就不应干预。
+    ///     旧逻辑 90% 面积重叠过严：窗口靠近菜单栏/Dock 时重叠率低于 90% 被误判为"不在目标屏"，
+    ///     导致 pinToScreen 应用在指定屏幕内也无法自由拖动。
     private func isBoundsInTargetFrame(_ bounds: CGRect, targetFrame: CGRect) -> Bool {
-        return windowOverlapRatio(bounds, targetFrame: targetFrame) >= 0.9
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        return targetFrame.contains(center)
     }
 
     /// 计算窗口与目标屏 visibleFrame 的重叠面积占比
@@ -1833,7 +1834,7 @@ class WindowMover: ObservableObject {
 
         // FIX-Electron 步骤 5: 执行移动
         movingWindows.insert(windowID)
-        moveWindowToScreenCenter(targetWindow, targetFrame: targetFrame, windowID: windowID)
+        moveWindowToTargetScreen(targetWindow, targetFrame: targetFrame, windowID: windowID)
     }
 
     /// FIX-响应慢: pinObserver 快速路径——直接用 AX 读取窗口位置 + 移动
@@ -1915,10 +1916,10 @@ class WindowMover: ObservableObject {
 
         // 直接移动（已有 AX 窗口引用）
         // FIX: 不传 prebuiltSize——pinWindowSizeCache 可能在窗口 resize 后过期，
-        //      导致 moveWindowToScreenCenter 用旧 size 计算居中位置偏移。
-        //      让 moveWindowToScreenCenter 自己重新读取最新 size（~3-5ms AX 调用）
+        //      导致 moveWindowToTargetScreen 用旧 size 计算居中位置偏移。
+        //      让 moveWindowToTargetScreen 自己重新读取最新 size（~3-5ms AX 调用）
         movingWindows.insert(windowID)
-        moveWindowToScreenCenter(targetWindow, targetFrame: targetFrame, windowID: windowID)
+        moveWindowToTargetScreen(targetWindow, targetFrame: targetFrame, windowID: windowID)
     }
 
     /// 读取 AX 字符串属性辅助方法（用于生成稳定的窗口标识）
@@ -1971,9 +1972,12 @@ class WindowMover: ObservableObject {
         return nil
     }
     
-    /// 将窗口移到屏幕中心
+    /// FIX-自由移动: 将窗口移入目标屏幕，使用最小位移而非居中
+    ///     旧逻辑始终将窗口移到屏幕中心，导致 pinToScreen 应用在指定屏幕内拖动后也被弹回中心。
+    ///     新逻辑：保留窗口当前位置，仅当中心点不在目标屏时做最小位移修正，
+    ///     将窗口推到目标屏边缘而非中心，保持用户拖动的相对位置。
     /// FIX-响应慢: 支持传入 prebuiltSize，省掉一次 kAXSizeAttribute AX 调用（~3-5ms）
-    private func moveWindowToScreenCenter(_ window: AXUIElement, targetFrame: CGRect, windowID: String, prebuiltSize: CGSize? = nil) {
+    private func moveWindowToTargetScreen(_ window: AXUIElement, targetFrame: CGRect, windowID: String, prebuiltSize: CGSize? = nil) {
         var size = CGSize.zero
         if let prebuilt = prebuiltSize {
             size = prebuilt
@@ -1985,26 +1989,33 @@ class WindowMover: ObservableObject {
             }
         }
 
-        // 计算窗口中心位置（使用完整的目标屏幕坐标）
-        var newPosition = CGPoint(
-            x: targetFrame.origin.x + (targetFrame.width - size.width) / 2,
-            y: targetFrame.origin.y + (targetFrame.height - size.height) / 2
-        )
-
-        // FIX-居中偏移: clamp 确保窗口完全在 targetFrame 内
-        // 当窗口尺寸 > targetFrame 时，优先保证左上角在屏内（用户能看到标题栏），
-        // 而非居中后窗口部分超出屏幕边缘
-        if size.width > targetFrame.width {
-            // 窗口比屏幕宽：优先左对齐，右边缘允许超出
-            newPosition.x = targetFrame.origin.x
-        } else {
-            newPosition.x = max(targetFrame.origin.x, min(newPosition.x, targetFrame.maxX - size.width))
+        // 读取窗口当前位置
+        var currentPosition = CGPoint.zero
+        var posValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
+           let posVal = posValue {
+            AXValueGetValue(posVal as! AXValue, .cgPoint, &currentPosition)
         }
-        if size.height > targetFrame.height {
-            // 窗口比屏幕高：优先顶部对齐（标题栏可见），底部允许超出
-            newPosition.y = targetFrame.origin.y
-        } else {
-            newPosition.y = max(targetFrame.origin.y, min(newPosition.y, targetFrame.maxY - size.height))
+
+        // 计算最小位移——保留窗口当前位置，仅将中心点移入 targetFrame
+        var newPosition = currentPosition
+        let center = CGPoint(x: newPosition.x + size.width / 2, y: newPosition.y + size.height / 2)
+
+        if !targetFrame.contains(center) {
+            // X 轴：将窗口推入 targetFrame，保持最小位移
+            if size.width > targetFrame.width {
+                // 窗口比屏幕宽：优先左对齐，右边缘允许超出
+                newPosition.x = targetFrame.origin.x
+            } else {
+                newPosition.x = max(targetFrame.origin.x, min(newPosition.x, targetFrame.maxX - size.width))
+            }
+            // Y 轴：将窗口推入 targetFrame，保持最小位移
+            if size.height > targetFrame.height {
+                // 窗口比屏幕高：优先顶部对齐（标题栏可见），底部允许超出
+                newPosition.y = targetFrame.origin.y
+            } else {
+                newPosition.y = max(targetFrame.origin.y, min(newPosition.y, targetFrame.maxY - size.height))
+            }
         }
 
         var position = newPosition
