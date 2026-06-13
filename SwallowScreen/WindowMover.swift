@@ -88,7 +88,7 @@ class WindowMover: ObservableObject {
     // FIX-响应慢: pinObserver 快速路径缓存——pid → (targetFrame, screenID)
     // 窗口移动事件到达时直接查缓存，跳过 SwiftData fetch + runningApplications 遍历
     // 在 refreshPinObservers / invalidateScreenCache 时同步更新
-    private var pinTargetCache: [pid_t: (frame: CGRect, screenID: UInt32)] = [:]
+    private var pinTargetCache: [pid_t: (frame: CGRect, visibleFrame: CGRect, screenID: UInt32)] = [:]
 
     // FIX-响应慢: 缓存 pid → 主窗口 AXUIElement 引用，避免每次 kAXWindowsAttribute 查询（~5-15ms）
     private var pinWindowCache: [pid_t: AXUIElement] = [:]
@@ -450,7 +450,7 @@ class WindowMover: ObservableObject {
 
         // 快速路径——直接查 pinTargetCache
         if let cached = pinTargetCache[pid] {
-            checkWindowPosition(pid: pid, targetFrame: cached.frame, appBundleID: "", screenID: cached.screenID, fastPath: true)
+            checkWindowPosition(pid: pid, screenFrame: cached.frame, targetFrame: cached.visibleFrame, appBundleID: "", screenID: cached.screenID, fastPath: true)
             return
         }
 
@@ -476,7 +476,7 @@ class WindowMover: ObservableObject {
         guard let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) else { return }
 
         // FIX-响应慢: 只查单个 pid 的窗口，不扫描全部
-        checkWindowPosition(pid: pid, targetFrame: resolved.frame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id)
+        checkWindowPosition(pid: pid, screenFrame: resolved.frame, targetFrame: resolved.visibleFrame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id)
     }
 
     /// 移除指定 pid 的 pinToScreen observer
@@ -527,7 +527,7 @@ class WindowMover: ObservableObject {
 
         // 需要监听的 pid 集合 + 构建 pinTargetCache
         var desiredPids: Set<pid_t> = []
-        var newPinTargetCache: [pid_t: (frame: CGRect, screenID: UInt32)] = [:]
+        var newPinTargetCache: [pid_t: (frame: CGRect, visibleFrame: CGRect, screenID: UInt32)] = [:]
         for appInfo in pinnedApps {
             if runningBundleIDs.contains(appInfo.bundleIdentifier),
                let pid = bundleIDToPid[appInfo.bundleIdentifier] {
@@ -535,7 +535,7 @@ class WindowMover: ObservableObject {
                 setupPinObserver(for: pid)
                 // FIX-响应慢: 预计算 targetFrame 并缓存
                 if let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) {
-                    newPinTargetCache[pid] = (resolved.frame, resolved.id)
+                    newPinTargetCache[pid] = (resolved.frame, resolved.visibleFrame, resolved.id)
                 }
             }
         }
@@ -658,11 +658,11 @@ class WindowMover: ObservableObject {
 
         // 借鉴 yabai：AXObserver 事件驱动作为主检测路径（零轮询，窗口创建即触发）
         // 双链轮询降级为兜底（AXObserver 对少数 App 如 Electron 可能不触发）
-        setupAXObserver(for: pid, targetFrame: resolved.frame, titlePattern: appInfo.windowTitlePattern)
+        setupAXObserver(for: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
 
         // 兜底：启动双链轮询（CG 33ms + AX 100ms），AXObserver 先命中时会自动取消轮询
         // 对 Electron 等不触发 kAXWindowCreatedNotification 的 App 仍需轮询
-        earlyWindowCatcher(pid: pid, targetFrame: resolved.frame, titlePattern: appInfo.windowTitlePattern)
+        earlyWindowCatcher(pid: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
     }
     
     /// 设置 AX 窗口的 hidden 属性
@@ -1197,13 +1197,21 @@ class WindowMover: ObservableObject {
         timer.resume()
     }
 
-    /// 判断窗口是否"在目标屏"：窗口中心点在 targetFrame 内即视为在目标屏
-    /// FIX-自由移动: 改用中心点判定——只要窗口主体在正确屏幕上，就不应干预。
+    /// 判断窗口是否"在目标屏合理位置"：窗口中心点在 visibleFrame 内 AND 窗口至少有 50% 在 visibleFrame 内
+    /// FIX-自由移动: 改用"中心点 AND 50%面积"双条件判定
     ///     旧逻辑 90% 面积重叠过严：窗口靠近菜单栏/Dock 时重叠率低于 90% 被误判为"不在目标屏"，
     ///     导致 pinToScreen 应用在指定屏幕内也无法自由拖动。
+    ///     改为"中心点 AND 50%面积"：
+    ///     - 中心点：保证窗口主体在正确屏幕上不误判
+    ///     - 50% 面积：避免窗口被 macOS 调整到奇怪位置（中心点在内但窗口大部分在屏外）时不被检测
+    ///     50% 阈值允许窗口大部分超出 visibleFrame（如一半在屏外），但不会让窗口大部分在屏外
     private func isBoundsInTargetFrame(_ bounds: CGRect, targetFrame: CGRect) -> Bool {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        return targetFrame.contains(center)
+        // 中心点在 visibleFrame 内——窗口主体在正确屏幕
+        guard targetFrame.contains(center) else { return false }
+        // 窗口至少有 50% 面积在 visibleFrame 内——窗口没有大部分在屏外
+        let overlapRatio = windowOverlapRatio(bounds, targetFrame: targetFrame)
+        return overlapRatio >= 0.5
     }
 
     /// 计算窗口与目标屏 visibleFrame 的重叠面积占比
@@ -1314,7 +1322,7 @@ class WindowMover: ObservableObject {
             // 找到运行中的应用并移动（走与 handleAppLaunch 相同的早期检测入口）
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first {
                 let pid = app.processIdentifier
-                earlyWindowCatcher(pid: pid, targetFrame: resolved.frame, titlePattern: appInfo.windowTitlePattern)
+                earlyWindowCatcher(pid: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
                 processedInBatch += 1
                 if processedInBatch >= batchSize {
                     processedInBatch = 0
@@ -1484,7 +1492,7 @@ class WindowMover: ObservableObject {
 
             // 使用预获取的主窗口 bounds（可能为 nil，表示当前无窗口）
             let mainBounds = allMainWindows[pid]
-            checkWindowPosition(pid: pid, targetFrame: resolved.frame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id, prebuiltMainBounds: mainBounds)
+            checkWindowPosition(pid: pid, screenFrame: resolved.frame, targetFrame: resolved.visibleFrame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id, prebuiltMainBounds: mainBounds)
         }
 
         // P1: 本轮扫到的存活 pids——previousWindowPositions 中其他 pid 前缀视为死键
@@ -1582,7 +1590,8 @@ class WindowMover: ObservableObject {
     private struct ScreenInfo {
         let id: UInt32
         let name: String
-        let frame: CGRect
+        let frame: CGRect          // screen.frame（全屏区域，含菜单栏/Dock）
+        let visibleFrame: CGRect   // screen.visibleFrame（可用区域，排除菜单栏/Dock）
         let serialNumber: String?
     }
 
@@ -1691,10 +1700,10 @@ class WindowMover: ObservableObject {
         for screen in NSScreen.screens {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
             let name = screen.localizedName
-            // 使用 visibleFrame 获取可视区域（排除菜单栏和 Dock），确保窗口在可视区域内居中
-            let frame = screen.visibleFrame
+            let frame = screen.frame
+            let visibleFrame = screen.visibleFrame
             let serialNumber = ScreenManager.serialNumber(for: screen)
-            mappings.append(ScreenInfo(id: screenID, name: name, frame: frame, serialNumber: serialNumber))
+            mappings.append(ScreenInfo(id: screenID, name: name, frame: frame, visibleFrame: visibleFrame, serialNumber: serialNumber))
         }
         cachedScreenMappings = mappings
         screenCacheValidUntil = Date().addingTimeInterval(2.0)  // 2s 兜底过期
@@ -1715,8 +1724,8 @@ class WindowMover: ObservableObject {
         return nil
     }
 
-    /// 通过名称查找屏幕 frame
-    private func findScreenFrameByName(_ name: String, currentScreens: [ScreenInfo]) -> CGRect? {
+    /// 通过名称查找屏幕
+    private func findScreenByName(_ name: String, currentScreens: [ScreenInfo]) -> ScreenInfo? {
         let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedName.isEmpty else { return nil }
 
@@ -1724,7 +1733,7 @@ class WindowMover: ObservableObject {
         if let exact = currentScreens.first(where: {
             $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(normalizedName) == .orderedSame
         }) {
-            return exact.frame
+            return exact
         }
         // R-228: 兼容旧版本——旧版存储的 targetScreenName 可能含分辨率后缀
         //        （如 "DELL U2720Q (2560x1440)"），R-222 后 name 仅 localizedName
@@ -1735,35 +1744,36 @@ class WindowMover: ObservableObject {
                 && normalizedName.hasPrefix(screenName) {
                 let suffix = normalizedName.dropFirst(screenName.count).trimmingCharacters(in: .whitespacesAndNewlines)
                 if suffix.hasPrefix("(") || suffix.first?.isNumber == true {
-                    return screen.frame
+                    return screen
                 }
             }
         }
         // RT42: 匹配失败时输出 debug 日志
         let candidates = currentScreens.map { $0.name }.joined(separator: " | ")
         // P2: 改用 Logger——失败时打 debug
-        logger.debug("findScreenFrameByName 未匹配: 输入=\(normalizedName, privacy: .public) 候选=[\(candidates, privacy: .public)]")
+        logger.debug("findScreenByName 未匹配: 输入=\(normalizedName, privacy: .public) 候选=[\(candidates, privacy: .public)]")
         return nil
     }
 
     /// RT69: 抽 resolveTargetFrame helper
     /// 三处调用点（handleAppLaunch / moveAllOpenAppsToAssignedScreens / checkAndEnforcePinnedWindows）统一
     /// 优先级：serialNumber → screenID → screenName
-    /// - Returns: (frame, id) 元组；id 仅 checkAndEnforcePinnedWindows 需要
-    private func resolveTargetFrame(for appInfo: AppInfo, currentScreens: [ScreenInfo]) -> (frame: CGRect, id: UInt32)? {
+    /// - Returns: (frame, visibleFrame, id) 三元组
+    ///   - frame: screen.frame（全屏区域），用于回弹时计算视觉中心
+    ///   - visibleFrame: screen.visibleFrame（可用区域），用于判定窗口是否在目标屏 + clamp
+    ///   - id: 屏幕ID，仅 checkAndEnforcePinnedWindows 需要
+    private func resolveTargetFrame(for appInfo: AppInfo, currentScreens: [ScreenInfo]) -> (frame: CGRect, visibleFrame: CGRect, id: UInt32)? {
         if let serialNumber = appInfo.targetScreenSerialNumber,
            let matched = findScreenBySerialNumber(serialNumber, currentScreens: currentScreens) {
-            return (matched.frame, matched.id)
+            return (matched.frame, matched.visibleFrame, matched.id)
         }
         if let screenID = appInfo.targetScreenID,
-           let frame = getScreenFrame(for: screenID) {
-            return (frame, screenID)
+           let screenInfo = getScreenInfo(for: screenID) {
+            return (screenInfo.frame, screenInfo.visibleFrame, screenID)
         }
         if let screenName = appInfo.targetScreenName,
-           let frame = findScreenFrameByName(screenName, currentScreens: currentScreens) {
-            // 名称匹配时，尝试找到对应的 ID
-            let id = currentScreens.first(where: { $0.frame == frame })?.id ?? 0
-            return (frame, id)
+           let matched = findScreenByName(screenName, currentScreens: currentScreens) {
+            return (matched.frame, matched.visibleFrame, matched.id)
         }
         return nil
     }
@@ -1778,10 +1788,10 @@ class WindowMover: ObservableObject {
     /// FIX-响应慢: 支持传入 prebuiltMainBounds，避免在 checkAndEnforcePinnedWindows 循环内重复调用 CGWindowListCopyWindowInfo
     /// FIX-响应慢: 新增 fastPath 参数——pinObserver 快速路径中直接用 AX 读取位置 + 移动，
     ///     跳过 CGWindowList 扫描，减少 ~50-100ms 延迟
-    private func checkWindowPosition(pid: pid_t, targetFrame: CGRect, appBundleID: String, screenID: UInt32, prebuiltMainBounds: CGRect? = nil, fastPath: Bool = false) {
+    private func checkWindowPosition(pid: pid_t, screenFrame: CGRect, targetFrame: CGRect, appBundleID: String, screenID: UInt32, prebuiltMainBounds: CGRect? = nil, fastPath: Bool = false) {
         if fastPath {
             // FIX-响应慢: 快速路径——直接用 AX 读取主窗口位置并判断，跳过 CGWindowList
-            checkWindowPositionFastPath(pid: pid, targetFrame: targetFrame, screenID: screenID)
+            checkWindowPositionFastPath(pid: pid, screenFrame: screenFrame, targetFrame: targetFrame, screenID: screenID)
             return
         }
 
@@ -1834,14 +1844,15 @@ class WindowMover: ObservableObject {
 
         // FIX-Electron 步骤 5: 执行移动
         movingWindows.insert(windowID)
-        moveWindowToTargetScreen(targetWindow, targetFrame: targetFrame, windowID: windowID)
+        // FIX-侧边: 传入 bounds.size 作为 prebuiltSize，避免 AX 读取 size 失败导致居中偏移
+        moveWindowToTargetScreen(targetWindow, screenFrame: screenFrame, visibleFrame: targetFrame, windowID: windowID, prebuiltSize: bounds.size)
     }
 
     /// FIX-响应慢: pinObserver 快速路径——直接用 AX 读取窗口位置 + 移动
     /// 跳过 CGWindowListCopyWindowInfo 全量扫描，减少 ~50-100ms 延迟
     /// 如果 AX 读取失败（如 Electron 应用），回退到 CGWindowList 路径
     /// FIX-响应慢: 缓存主窗口 AXUIElement 引用，避免每次 kAXWindowsAttribute 查询（~5-15ms）
-    private func checkWindowPositionFastPath(pid: pid_t, targetFrame: CGRect, screenID: UInt32) {
+    private func checkWindowPositionFastPath(pid: pid_t, screenFrame: CGRect, targetFrame: CGRect, screenID: UInt32) {
         let windowID = "\(pid)-main"
 
         // FIX-响应慢: 优先使用缓存的主窗口引用，跳过 kAXWindowsAttribute 查询
@@ -1855,7 +1866,7 @@ class WindowMover: ObservableObject {
 
             guard axResult == .success, let axWindows = windowsValue as? [AXUIElement], !axWindows.isEmpty else {
                 // AX 失败（如 Electron 应用）——回退到 CGWindowList 路径
-                checkWindowPosition(pid: pid, targetFrame: targetFrame, appBundleID: "", screenID: screenID)
+                checkWindowPosition(pid: pid, screenFrame: screenFrame, targetFrame: targetFrame, appBundleID: "", screenID: screenID)
                 return
             }
 
@@ -1880,7 +1891,7 @@ class WindowMover: ObservableObject {
             // 无法读取位置——缓存可能失效，清除后回退
             pinWindowCache.removeValue(forKey: pid)
             pinWindowSizeCache.removeValue(forKey: pid)
-            checkWindowPosition(pid: pid, targetFrame: targetFrame, appBundleID: "", screenID: screenID)
+            checkWindowPosition(pid: pid, screenFrame: screenFrame, targetFrame: targetFrame, appBundleID: "", screenID: screenID)
             return
         }
         var position = CGPoint.zero
@@ -1915,11 +1926,9 @@ class WindowMover: ObservableObject {
         if lastMovedWindows.contains(windowID) || movingWindows.contains(windowID) { return }
 
         // 直接移动（已有 AX 窗口引用）
-        // FIX: 不传 prebuiltSize——pinWindowSizeCache 可能在窗口 resize 后过期，
-        //      导致 moveWindowToTargetScreen 用旧 size 计算居中位置偏移。
-        //      让 moveWindowToTargetScreen 自己重新读取最新 size（~3-5ms AX 调用）
+        // FIX-侧边: 传入 bounds.size 作为 prebuiltSize，避免 AX 读取 size 失败导致居中偏移
         movingWindows.insert(windowID)
-        moveWindowToTargetScreen(targetWindow, targetFrame: targetFrame, windowID: windowID)
+        moveWindowToTargetScreen(targetWindow, screenFrame: screenFrame, visibleFrame: targetFrame, windowID: windowID, prebuiltSize: bounds.size)
     }
 
     /// 读取 AX 字符串属性辅助方法（用于生成稳定的窗口标识）
@@ -1972,50 +1981,63 @@ class WindowMover: ObservableObject {
         return nil
     }
     
-    /// FIX-自由移动: 将窗口移入目标屏幕，使用最小位移而非居中
-    ///     旧逻辑始终将窗口移到屏幕中心，导致 pinToScreen 应用在指定屏幕内拖动后也被弹回中心。
-    ///     新逻辑：保留窗口当前位置，仅当中心点不在目标屏时做最小位移修正，
-    ///     将窗口推到目标屏边缘而非中心，保持用户拖动的相对位置。
+    /// FIX-正中: 优先从 AX 读取 size（content 实际尺寸，不含阴影），保证居中计算准确
+    ///     CGWindowList bounds.size 在不同 macOS 版本/不同应用上可能包含窗口阴影，
+    ///     用 AX size 才能保证 content 在 visibleFrame 几何中心。
+    ///     仅当 AX size 读取失败（width<=0 或 height<=0）时回退到 fallback（通常是 CG bounds.size）
+    private func readWindowSizeFromAX(_ window: AXUIElement, fallback: CGSize? = nil) -> CGSize {
+        var sizeValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+           let sizeVal = sizeValue {
+            var size = CGSize.zero
+            // Swift 6 SDK: AXValueGetValue 需要 3 个参数 (value, type, outValue)
+            if AXValueGetValue(sizeVal as! AXValue, .cgSize, &size), size.width > 0, size.height > 0 {
+                return size
+            }
+        }
+        return fallback ?? .zero
+    }
+
+    /// FIX-自由移动: 将窗口移入目标屏幕
+    ///     行为：窗口在目标屏内时保持不动；窗口被拖到其他屏幕时，居中弹回目标屏幕。
+    /// FIX-偏下: 居中时使用 screenFrame（全屏区域）计算视觉中心，再用 visibleFrame clamp，
+    ///     避免 visibleFrame 中心偏下导致回弹后应用普遍偏下显示。
     /// FIX-响应慢: 支持传入 prebuiltSize，省掉一次 kAXSizeAttribute AX 调用（~3-5ms）
-    private func moveWindowToTargetScreen(_ window: AXUIElement, targetFrame: CGRect, windowID: String, prebuiltSize: CGSize? = nil) {
-        var size = CGSize.zero
-        if let prebuilt = prebuiltSize {
-            size = prebuilt
+    /// FIX-正中4: 优先从 AX 读 size（content 实际尺寸），CG bounds.size 在部分 macOS 版本/应用
+    ///     上包含窗口阴影，用 CG size 居中会导致 content 中心偏离 visibleFrame 几何中心（阴影/2）
+    private func moveWindowToTargetScreen(_ window: AXUIElement, screenFrame: CGRect, visibleFrame: CGRect, windowID: String, prebuiltSize: CGSize? = nil) {
+        // FIX-正中4: 优先使用 AX size；AX 读取失败时才用 prebuiltSize（CG bounds.size，可能含阴影）
+        let size = readWindowSizeFromAX(window, fallback: prebuiltSize)
+
+        // 计算居中位置：使用 visibleFrame（可用区域）的几何中心
+        // FIX-正中: 与启动期 earlyWindowCatcher → moveWindowToFrameImmediate 完全一致
+        //     启动期用 visibleFrame 居中，回弹期也用 visibleFrame 居中，保证两次位置完全一致
+        //     之前用 screenFrame 算 Y 中心，与 visibleFrame 算 Y 中心有 ~25px 差异（菜单栏高度），
+        //     看起来窗口"没有回到正中"——实际是 X/Y 都正确居中但与启动期位置有微小差异。
+        // FIX-正中2: 用 midX/midY 显式计算中心点，避免 origin.x 为负数（如副屏在主屏左侧）
+        //     导致 X 中心计算错误的情况。
+        var newPosition = CGPoint(
+            x: visibleFrame.midX - size.width / 2,
+            y: visibleFrame.midY - size.height / 2
+        )
+
+        // FIX-正中3: 调试日志——输出实际 frame 值，帮助诊断"窗口没有正中"问题
+        //     如果窗口确实被回弹到计算出的 newPosition 但用户仍然觉得"没有正中"，
+        //     可能是 visibleFrame 与用户期望的屏幕不一致（如配置的是副屏但用户期望主屏）
+        logger.debug("moveWindowToTargetScreen: windowID=\(windowID, privacy: .public) visibleFrame=\(NSStringFromRect(visibleFrame), privacy: .public) screenFrame=\(NSStringFromRect(screenFrame), privacy: .public) size=\(NSStringFromSize(size), privacy: .public) newPosition=\(NSStringFromPoint(newPosition), privacy: .public)")
+
+        // clamp 到 visibleFrame，确保窗口完全在可视区域内（不覆盖菜单栏/Dock）
+        if size.width > visibleFrame.width {
+            // 窗口比可用区域宽：优先左对齐，右边缘允许超出
+            newPosition.x = visibleFrame.origin.x
         } else {
-            var sizeValue: CFTypeRef?
-            AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
-            if let sizeVal = sizeValue {
-                AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-            }
+            newPosition.x = max(visibleFrame.origin.x, min(newPosition.x, visibleFrame.maxX - size.width))
         }
-
-        // 读取窗口当前位置
-        var currentPosition = CGPoint.zero
-        var posValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
-           let posVal = posValue {
-            AXValueGetValue(posVal as! AXValue, .cgPoint, &currentPosition)
-        }
-
-        // 计算最小位移——保留窗口当前位置，仅将中心点移入 targetFrame
-        var newPosition = currentPosition
-        let center = CGPoint(x: newPosition.x + size.width / 2, y: newPosition.y + size.height / 2)
-
-        if !targetFrame.contains(center) {
-            // X 轴：将窗口推入 targetFrame，保持最小位移
-            if size.width > targetFrame.width {
-                // 窗口比屏幕宽：优先左对齐，右边缘允许超出
-                newPosition.x = targetFrame.origin.x
-            } else {
-                newPosition.x = max(targetFrame.origin.x, min(newPosition.x, targetFrame.maxX - size.width))
-            }
-            // Y 轴：将窗口推入 targetFrame，保持最小位移
-            if size.height > targetFrame.height {
-                // 窗口比屏幕高：优先顶部对齐（标题栏可见），底部允许超出
-                newPosition.y = targetFrame.origin.y
-            } else {
-                newPosition.y = max(targetFrame.origin.y, min(newPosition.y, targetFrame.maxY - size.height))
-            }
+        if size.height > visibleFrame.height {
+            // 窗口比可用区域高：优先顶部对齐（标题栏可见），底部允许超出
+            newPosition.y = visibleFrame.origin.y
+        } else {
+            newPosition.y = max(visibleFrame.origin.y, min(newPosition.y, visibleFrame.maxY - size.height))
         }
 
         var position = newPosition
@@ -2031,6 +2053,22 @@ class WindowMover: ObservableObject {
                 if !previousWindowPositionsOrderSet.contains(windowID) {
                     previousWindowPositionsOrder.append(windowID)
                     previousWindowPositionsOrderSet.insert(windowID)
+                }
+
+                // FIX-侧边: macOS 窗口管理器可能在设置 position 后立即将窗口吸附到屏幕边缘
+                //      延迟 50ms + 200ms + 500ms 三次重新读取窗口位置，如果偏离期望位置则再次修正
+                //      多次重试应对窗口管理器动画/吸附的完整周期
+                let windowRef = window
+                let windowIDCopy = windowID
+                let expectedPos = newPosition
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.recenterWindowIfNeeded(window: windowRef, expectedPosition: expectedPos, screenFrame: screenFrame, visibleFrame: visibleFrame, windowID: windowIDCopy, size: size)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    self?.recenterWindowIfNeeded(window: windowRef, expectedPosition: expectedPos, screenFrame: screenFrame, visibleFrame: visibleFrame, windowID: windowIDCopy, size: size)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.recenterWindowIfNeeded(window: windowRef, expectedPosition: expectedPos, screenFrame: screenFrame, visibleFrame: visibleFrame, windowID: windowIDCopy, size: size)
                 }
 
                 // FIX-响应慢: 冷却期从 2s 缩短到 1s，提升连续拖动场景响应
@@ -2051,13 +2089,73 @@ class WindowMover: ObservableObject {
             movingWindows.remove(windowID)
         }
     }
+
+    /// FIX-侧边: 重新居中窗口——macOS 窗口管理器可能将窗口吸附到屏幕边缘
+    ///     读取窗口当前位置，如果偏离期望位置，重新设置到 screenFrame 中心
+    /// FIX-正中4: 同样优先使用 AX size（content 实际尺寸），与 moveWindowToTargetScreen 保持一致
+    private func recenterWindowIfNeeded(window: AXUIElement, expectedPosition: CGPoint, screenFrame: CGRect, visibleFrame: CGRect, windowID: String, size: CGSize) {
+        var currentPos = CGPoint.zero
+        var posValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
+              let posVal = posValue else { return }
+        AXValueGetValue(posVal as! AXValue, .cgPoint, &currentPos)
+
+        // FIX-正中4: 重新读取 AX size——保证 recenter 用的 size 和初始 move 完全一致（都基于 AX）
+        let actualSize = readWindowSizeFromAX(window, fallback: size)
+        let useSize = actualSize.width > 0 && actualSize.height > 0 ? actualSize : size
+
+        // FIX-正中: 主动检查窗口中心点是否在 visibleFrame 的中心附近
+        //     如果窗口中心点不在 visibleFrame 中点 ±10px 范围内，认为需要重新居中
+        //     阈值设小（10px）确保窗口最终严格居中，不被 macOS 吸附到边缘
+        let visibleCenterX = visibleFrame.origin.x + visibleFrame.width / 2
+        let visibleCenterY = visibleFrame.origin.y + visibleFrame.height / 2
+        let currentCenterX = currentPos.x + useSize.width / 2
+        let currentCenterY = currentPos.y + useSize.height / 2
+        let isOffCenter = abs(currentCenterX - visibleCenterX) > 10 || abs(currentCenterY - visibleCenterY) > 10
+
+        // 窗口左/上边缘是否在 visibleFrame 外（macOS 吸附行为）
+        let isLeftOutside = currentPos.x < visibleFrame.origin.x - 5
+        let isTopOutside = currentPos.y < visibleFrame.origin.y - 5
+        let isRightOutside = (currentPos.x + useSize.width) > visibleFrame.maxX + 5
+        let isBottomOutside = (currentPos.y + useSize.height) > visibleFrame.maxY + 5
+
+        if isOffCenter || isLeftOutside || isTopOutside || isRightOutside || isBottomOutside {
+            // FIX-正中3: 调试日志——记录实际位置偏差
+            logger.debug("recenterWindowIfNeeded: windowID=\(windowID, privacy: .public) currentPos=\(NSStringFromPoint(currentPos), privacy: .public) expectedPos=\(NSStringFromPoint(expectedPosition), privacy: .public) useSize=\(NSStringFromSize(useSize), privacy: .public) visibleFrame=\(NSStringFromRect(visibleFrame), privacy: .public)")
+
+            // 重新计算居中位置并设置
+            // FIX-正中: 与 moveWindowToTargetScreen 完全一致——用 visibleFrame.midX/midY 几何居中
+            var newPosition = CGPoint(
+                x: visibleFrame.midX - useSize.width / 2,
+                y: visibleFrame.midY - useSize.height / 2
+            )
+
+            // clamp 到 visibleFrame
+            if useSize.width > visibleFrame.width {
+                newPosition.x = visibleFrame.origin.x
+            } else {
+                newPosition.x = max(visibleFrame.origin.x, min(newPosition.x, visibleFrame.maxX - useSize.width))
+            }
+            if useSize.height > visibleFrame.height {
+                newPosition.y = visibleFrame.origin.y
+            } else {
+                newPosition.y = max(visibleFrame.origin.y, min(newPosition.y, visibleFrame.maxY - useSize.height))
+            }
+
+            var position = newPosition
+            if let positionValue = AXValueCreate(.cgPoint, &position) {
+                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
+                // 更新缓存的位置记录
+                previousWindowPositions[windowID] = newPosition
+            }
+        }
+    }
     
-    private func getScreenFrame(for displayID: UInt32) -> CGRect? {
+    private func getScreenInfo(for displayID: UInt32) -> (frame: CGRect, visibleFrame: CGRect)? {
         for screen in NSScreen.screens {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
             if screenID == displayID {
-                // 使用 visibleFrame 返回可视区域（排除菜单栏和 Dock），确保窗口在可视区域内居中
-                return screen.visibleFrame
+                return (screen.frame, screen.visibleFrame)
             }
         }
         return nil
@@ -2070,19 +2168,20 @@ class WindowMover: ObservableObject {
                 if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
                     let pid = app.processIdentifier
                     // RT67: 走 earlyWindowCatcher 链路（hide → move → unhide + 稳态校验 + 防回弹）
-                    earlyWindowCatcher(pid: pid, targetFrame: matchedScreen.frame, titlePattern: titlePattern)
+                    // 启动期使用 visibleFrame 居中放置，避免覆盖菜单栏/Dock
+                    earlyWindowCatcher(pid: pid, targetFrame: matchedScreen.visibleFrame, titlePattern: titlePattern)
                 }
                 return
             }
         }
 
         // 备用：通过 ID 找屏幕
-        guard let screenFrame = getScreenFrame(for: screenID) else { return }
+        guard let screenInfo = getScreenInfo(for: screenID) else { return }
 
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
             let pid = app.processIdentifier
             // RT67: 同上
-            earlyWindowCatcher(pid: pid, targetFrame: screenFrame, titlePattern: titlePattern)
+            earlyWindowCatcher(pid: pid, targetFrame: screenInfo.visibleFrame, titlePattern: titlePattern)
         }
     }
 
