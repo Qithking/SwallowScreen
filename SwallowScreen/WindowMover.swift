@@ -2000,154 +2000,75 @@ class WindowMover: ObservableObject {
 
     /// FIX-自由移动: 将窗口移入目标屏幕
     ///     行为：窗口在目标屏内时保持不动；窗口被拖到其他屏幕时，居中弹回目标屏幕。
-    /// FIX-偏下: 居中时使用 screenFrame（全屏区域）计算视觉中心，再用 visibleFrame clamp，
-    ///     避免 visibleFrame 中心偏下导致回弹后应用普遍偏下显示。
-    /// FIX-响应慢: 支持传入 prebuiltSize，省掉一次 kAXSizeAttribute AX 调用（~3-5ms）
-    /// FIX-正中4: 优先从 AX 读 size（content 实际尺寸），CG bounds.size 在部分 macOS 版本/应用
-    ///     上包含窗口阴影，用 CG size 居中会导致 content 中心偏离 visibleFrame 几何中心（阴影/2）
+    /// FIX-正中5: 回弹时使用 hideMoveUnhide（与启动期一致），而非直接 AX 设置位置。
+    ///     直接 AX 设置会被 macOS 窗口管理器"纠正"（吸附/避免遮挡），导致窗口不在正中。
+    ///     hideMoveUnhide 先隐藏窗口再移动，窗口管理器不会干扰隐藏窗口的位置设置。
     private func moveWindowToTargetScreen(_ window: AXUIElement, screenFrame: CGRect, visibleFrame: CGRect, windowID: String, prebuiltSize: CGSize? = nil) {
-        // FIX-正中4: 优先使用 AX size；AX 读取失败时才用 prebuiltSize（CG bounds.size，可能含阴影）
-        let size = readWindowSizeFromAX(window, fallback: prebuiltSize)
+        // FIX-正中5: 使用 hideMoveUnhide 替代直接 AX 设置
+        //     启动期用 hideMoveUnhide 能正确居中，回弹期也应一致
+        hideMoveUnhide(axWindows: [window], targetFrame: visibleFrame)
 
-        // 计算居中位置：使用 visibleFrame（可用区域）的几何中心
-        // FIX-正中: 与启动期 earlyWindowCatcher → moveWindowToFrameImmediate 完全一致
-        //     启动期用 visibleFrame 居中，回弹期也用 visibleFrame 居中，保证两次位置完全一致
-        //     之前用 screenFrame 算 Y 中心，与 visibleFrame 算 Y 中心有 ~25px 差异（菜单栏高度），
-        //     看起来窗口"没有回到正中"——实际是 X/Y 都正确居中但与启动期位置有微小差异。
-        // FIX-正中2: 用 midX/midY 显式计算中心点，避免 origin.x 为负数（如副屏在主屏左侧）
-        //     导致 X 中心计算错误的情况。
-        var newPosition = CGPoint(
-            x: visibleFrame.midX - size.width / 2,
-            y: visibleFrame.midY - size.height / 2
+        lastMovedWindows.insert(windowID)
+
+        // FIX-正中5: 回读窗口实际位置作为缓存（hideMoveUnhide 内部有 clamp，实际位置可能与理论计算不同）
+        let actualSize = readWindowSizeFromAX(window, fallback: prebuiltSize)
+        let expectedPos = CGPoint(
+            x: visibleFrame.midX - actualSize.width / 2,
+            y: visibleFrame.midY - actualSize.height / 2
         )
-
-        // FIX-正中3: 调试日志——输出实际 frame 值，帮助诊断"窗口没有正中"问题
-        //     如果窗口确实被回弹到计算出的 newPosition 但用户仍然觉得"没有正中"，
-        //     可能是 visibleFrame 与用户期望的屏幕不一致（如配置的是副屏但用户期望主屏）
-        logger.debug("moveWindowToTargetScreen: windowID=\(windowID, privacy: .public) visibleFrame=\(NSStringFromRect(visibleFrame), privacy: .public) screenFrame=\(NSStringFromRect(screenFrame), privacy: .public) size=\(NSStringFromSize(size), privacy: .public) newPosition=\(NSStringFromPoint(newPosition), privacy: .public)")
-
-        // clamp 到 visibleFrame，确保窗口完全在可视区域内（不覆盖菜单栏/Dock）
-        if size.width > visibleFrame.width {
-            // 窗口比可用区域宽：优先左对齐，右边缘允许超出
-            newPosition.x = visibleFrame.origin.x
-        } else {
-            newPosition.x = max(visibleFrame.origin.x, min(newPosition.x, visibleFrame.maxX - size.width))
+        // 尝试回读 AX 实际位置，失败时用计算值
+        var actualPos = expectedPos
+        var posValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
+           let posVal = posValue {
+            AXValueGetValue(posVal as! AXValue, .cgPoint, &actualPos)
         }
-        if size.height > visibleFrame.height {
-            // 窗口比可用区域高：优先顶部对齐（标题栏可见），底部允许超出
-            newPosition.y = visibleFrame.origin.y
-        } else {
-            newPosition.y = max(visibleFrame.origin.y, min(newPosition.y, visibleFrame.maxY - size.height))
+        previousWindowPositions[windowID] = actualPos
+        if !previousWindowPositionsOrderSet.contains(windowID) {
+            previousWindowPositionsOrder.append(windowID)
+            previousWindowPositionsOrderSet.insert(windowID)
         }
 
-        var position = newPosition
-        if let positionValue = AXValueCreate(.cgPoint, &position) {
-            let result = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
-            if result == .success {
-                // FIX-响应慢: 去掉验证读（AXUIElementCopyAttributeValue verify），减少一次 AX 往返（~5-15ms）
-                // 信任 AX 返回值；如果窗口实际没移动（如 Electron 最大化窗口），
-                // 下次 kAXMovedNotification 不会触发（窗口没动），不会误判
-                // 但 100ms 定时器仍会检测到窗口不在目标屏，自动重试
-                lastMovedWindows.insert(windowID)
-                previousWindowPositions[windowID] = newPosition
-                if !previousWindowPositionsOrderSet.contains(windowID) {
-                    previousWindowPositionsOrder.append(windowID)
-                    previousWindowPositionsOrderSet.insert(windowID)
-                }
-
-                // FIX-侧边: macOS 窗口管理器可能在设置 position 后立即将窗口吸附到屏幕边缘
-                //      延迟 50ms + 200ms + 500ms 三次重新读取窗口位置，如果偏离期望位置则再次修正
-                //      多次重试应对窗口管理器动画/吸附的完整周期
-                let windowRef = window
-                let windowIDCopy = windowID
-                let expectedPos = newPosition
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                    self?.recenterWindowIfNeeded(window: windowRef, expectedPosition: expectedPos, screenFrame: screenFrame, visibleFrame: visibleFrame, windowID: windowIDCopy, size: size)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    self?.recenterWindowIfNeeded(window: windowRef, expectedPosition: expectedPos, screenFrame: screenFrame, visibleFrame: visibleFrame, windowID: windowIDCopy, size: size)
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    self?.recenterWindowIfNeeded(window: windowRef, expectedPosition: expectedPos, screenFrame: screenFrame, visibleFrame: visibleFrame, windowID: windowIDCopy, size: size)
-                }
-
-                // FIX-响应慢: 冷却期从 2s 缩短到 1s，提升连续拖动场景响应
-                let key = cooldownKey(windowID: windowID)
-                cooldownWorkItems[key]?.cancel()
-                let workItem = DispatchWorkItem { [weak self] in
-                    self?.lastMovedWindows.remove(windowID)
-                    self?.cooldownWorkItems.removeValue(forKey: key)
-                }
-                cooldownWorkItems[key] = workItem
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
-
-                movingWindows.remove(windowID)
-            } else {
-                movingWindows.remove(windowID)
-            }
-        } else {
-            movingWindows.remove(windowID)
+        // FIX-正中5: 延迟验证——500ms 后读取实际位置，如果偏离中心则再次 hideMoveUnhide
+        let windowRef = window
+        let windowIDCopy = windowID
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.verifyAndRecenterWindow(window: windowRef, visibleFrame: visibleFrame, windowID: windowIDCopy)
         }
+
+        // FIX-响应慢: 冷却期从 2s 缩短到 1s，提升连续拖动场景响应
+        let key = cooldownKey(windowID: windowID)
+        cooldownWorkItems[key]?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.lastMovedWindows.remove(windowID)
+            self?.cooldownWorkItems.removeValue(forKey: key)
+        }
+        cooldownWorkItems[key] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+
+        movingWindows.remove(windowID)
     }
 
-    /// FIX-侧边: 重新居中窗口——macOS 窗口管理器可能将窗口吸附到屏幕边缘
-    ///     读取窗口当前位置，如果偏离期望位置，重新设置到 screenFrame 中心
-    /// FIX-正中4: 同样优先使用 AX size（content 实际尺寸），与 moveWindowToTargetScreen 保持一致
-    private func recenterWindowIfNeeded(window: AXUIElement, expectedPosition: CGPoint, screenFrame: CGRect, visibleFrame: CGRect, windowID: String, size: CGSize) {
+    /// FIX-正中5: 验证窗口是否在 visibleFrame 正中，如果偏离则用 hideMoveUnhide 重新居中
+    private func verifyAndRecenterWindow(window: AXUIElement, visibleFrame: CGRect, windowID: String) {
         var currentPos = CGPoint.zero
         var posValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
               let posVal = posValue else { return }
         AXValueGetValue(posVal as! AXValue, .cgPoint, &currentPos)
 
-        // FIX-正中4: 重新读取 AX size——保证 recenter 用的 size 和初始 move 完全一致（都基于 AX）
-        let actualSize = readWindowSizeFromAX(window, fallback: size)
-        let useSize = actualSize.width > 0 && actualSize.height > 0 ? actualSize : size
+        let useSize = readWindowSizeFromAX(window)
+        guard useSize.width > 0, useSize.height > 0 else { return }
 
-        // FIX-正中: 主动检查窗口中心点是否在 visibleFrame 的中心附近
-        //     如果窗口中心点不在 visibleFrame 中点 ±10px 范围内，认为需要重新居中
-        //     阈值设小（10px）确保窗口最终严格居中，不被 macOS 吸附到边缘
-        let visibleCenterX = visibleFrame.origin.x + visibleFrame.width / 2
-        let visibleCenterY = visibleFrame.origin.y + visibleFrame.height / 2
+        let visibleCenterX = visibleFrame.midX
+        let visibleCenterY = visibleFrame.midY
         let currentCenterX = currentPos.x + useSize.width / 2
         let currentCenterY = currentPos.y + useSize.height / 2
-        let isOffCenter = abs(currentCenterX - visibleCenterX) > 10 || abs(currentCenterY - visibleCenterY) > 10
+        let isOffCenter = abs(currentCenterX - visibleCenterX) > 5 || abs(currentCenterY - visibleCenterY) > 5
 
-        // 窗口左/上边缘是否在 visibleFrame 外（macOS 吸附行为）
-        let isLeftOutside = currentPos.x < visibleFrame.origin.x - 5
-        let isTopOutside = currentPos.y < visibleFrame.origin.y - 5
-        let isRightOutside = (currentPos.x + useSize.width) > visibleFrame.maxX + 5
-        let isBottomOutside = (currentPos.y + useSize.height) > visibleFrame.maxY + 5
-
-        if isOffCenter || isLeftOutside || isTopOutside || isRightOutside || isBottomOutside {
-            // FIX-正中3: 调试日志——记录实际位置偏差
-            logger.debug("recenterWindowIfNeeded: windowID=\(windowID, privacy: .public) currentPos=\(NSStringFromPoint(currentPos), privacy: .public) expectedPos=\(NSStringFromPoint(expectedPosition), privacy: .public) useSize=\(NSStringFromSize(useSize), privacy: .public) visibleFrame=\(NSStringFromRect(visibleFrame), privacy: .public)")
-
-            // 重新计算居中位置并设置
-            // FIX-正中: 与 moveWindowToTargetScreen 完全一致——用 visibleFrame.midX/midY 几何居中
-            var newPosition = CGPoint(
-                x: visibleFrame.midX - useSize.width / 2,
-                y: visibleFrame.midY - useSize.height / 2
-            )
-
-            // clamp 到 visibleFrame
-            if useSize.width > visibleFrame.width {
-                newPosition.x = visibleFrame.origin.x
-            } else {
-                newPosition.x = max(visibleFrame.origin.x, min(newPosition.x, visibleFrame.maxX - useSize.width))
-            }
-            if useSize.height > visibleFrame.height {
-                newPosition.y = visibleFrame.origin.y
-            } else {
-                newPosition.y = max(visibleFrame.origin.y, min(newPosition.y, visibleFrame.maxY - useSize.height))
-            }
-
-            var position = newPosition
-            if let positionValue = AXValueCreate(.cgPoint, &position) {
-                AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
-                // 更新缓存的位置记录
-                previousWindowPositions[windowID] = newPosition
-            }
+        if isOffCenter {
+            logger.debug("verifyAndRecenterWindow: windowID=\(windowID, privacy: .public) currentCenter=\(NSStringFromPoint(CGPoint(x: currentCenterX, y: currentCenterY)), privacy: .public) visibleCenter=\(NSStringFromPoint(CGPoint(x: visibleCenterX, y: visibleCenterY)), privacy: .public) useSize=\(NSStringFromSize(useSize), privacy: .public) → recentering")
+            hideMoveUnhide(axWindows: [window], targetFrame: visibleFrame)
         }
     }
     
