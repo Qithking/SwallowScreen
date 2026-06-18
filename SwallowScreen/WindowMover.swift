@@ -99,10 +99,13 @@ class WindowMover: ObservableObject {
     // 鼠标按下时记录 pid，等全局 leftMouseUp 事件触发后立即回弹
     private var pendingDragCheckPids: Set<pid_t> = []
     private var globalMouseUpMonitor: Any? = nil
+    // RT160: scheduleAXFallbackMove 的延迟 workItems，stopMonitoring 时可取消
+    private var axFallbackWorkItems: [DispatchWorkItem] = []
 
     init() {
         _ = checkAccessibilityPermission()
-        setupAppLaunchObserver()
+        // FIX-启动不搬窗: NSWorkspace.didLaunchApplicationNotification 监听改到 startMonitoring 中注册，
+        //   避免 AppDelegate 延迟 1s 创建 WindowMover 期间丢失应用启动通知
         setupAppTerminationObserver()
         setupScreenChangeObserver()
         setupAXWindowCreatedObserver()
@@ -157,6 +160,8 @@ class WindowMover: ObservableObject {
         }
         for context in activeDetections.values { context.cancel() }
         for item in cooldownWorkItems.values { item.cancel() }
+        // RT160: 取消 AX 兜底延迟任务
+        for item in axFallbackWorkItems { item.cancel() }
     }
 
     /// C3: 监听 .screenConfigurationChanged 屏变化事件——失效屏幕缓存
@@ -239,7 +244,8 @@ class WindowMover: ObservableObject {
         }
 
         let runLoopSource = AXObserverGetRunLoopSource(observer)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .defaultMode)
+        // RT159: 显式使用 CFRunLoopGetMain()，与 removeAXObserver/deinit 中移除保持一致
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
 
         axObservers[pid] = observer
         axRunLoopSources[pid] = runLoopSource
@@ -313,7 +319,9 @@ class WindowMover: ObservableObject {
     /// 移除指定 pid 的 AXObserver + RunLoopSource
     private func removeAXObserver(for pid: pid_t) {
         if let source = axRunLoopSources[pid] {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
+            // RT158: 使用 CFRunLoopGetMain() 而非 CFRunLoopGetCurrent()，
+            //        source 加在主 RunLoop 上，必须从主 RunLoop 移除
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
             axRunLoopSources.removeValue(forKey: pid)
         }
         if let observer = axObservers[pid] {
@@ -352,7 +360,8 @@ class WindowMover: ObservableObject {
         }
 
         let runLoopSource = AXObserverGetRunLoopSource(observer)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .defaultMode)
+        // RT159: 显式使用 CFRunLoopGetMain()，与 removePinObserver/deinit 中移除保持一致
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
 
         pinObservers[pid] = observer
         pinRunLoopSources[pid] = runLoopSource
@@ -482,7 +491,9 @@ class WindowMover: ObservableObject {
     /// 移除指定 pid 的 pinToScreen observer
     private func removePinObserver(for pid: pid_t) {
         if let source = pinRunLoopSources[pid] {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
+            // RT154: 使用 CFRunLoopGetMain() 而非 CFRunLoopGetCurrent()，
+            //        source 加在主 RunLoop 上，必须从主 RunLoop 移除
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode)
             pinRunLoopSources.removeValue(forKey: pid)
         }
         if let observer = pinObservers[pid] {
@@ -600,7 +611,9 @@ class WindowMover: ObservableObject {
     
     /// 设置应用启动观察者
     /// RT17: [weak self] 写在 Task 闭包内（Swift 捕获列表必须在闭包起始位置）
+    /// FIX-启动不搬窗: 改为幂等注册——token 已存在则跳过，配合 startMonitoring 调用
     private func setupAppLaunchObserver() {
+        guard appLaunchObserverToken == nil else { return }
         appLaunchObserverToken = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil,
@@ -656,6 +669,8 @@ class WindowMover: ObservableObject {
             return
         }
 
+        logger.info("handleAppLaunch 解析目标屏幕: bundleID=\(bundleIdentifier, privacy: .public) screenID=\(resolved.id) frame=\(NSStringFromRect(resolved.frame), privacy: .public) visibleFrame=\(NSStringFromRect(resolved.visibleFrame), privacy: .public)")
+
         // 借鉴 yabai：AXObserver 事件驱动作为主检测路径（零轮询，窗口创建即触发）
         // 双链轮询降级为兜底（AXObserver 对少数 App 如 Electron 可能不触发）
         setupAXObserver(for: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
@@ -663,6 +678,56 @@ class WindowMover: ObservableObject {
         // 兜底：启动双链轮询（CG 33ms + AX 100ms），AXObserver 先命中时会自动取消轮询
         // 对 Electron 等不触发 kAXWindowCreatedNotification 的 App 仍需轮询
         earlyWindowCatcher(pid: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
+
+        // FIX-启动不搬窗: 延迟 AX 兜底——部分 App（如微信）启动时 AXObserver/CGWindowList 都检测不到窗口，
+        // 但在几百 ms 后 AX 窗口属性可用。这里在 0.5s 和 1.5s 再各尝试一次直接 AX 搬窗。
+        scheduleAXFallbackMove(pid: pid, targetFrame: resolved.visibleFrame, delays: [0.5, 1.5])
+    }
+
+    /// FIX-启动不搬窗: 应用启动后的延迟 AX 兜底搬窗
+    /// 不依赖 kAXWindowCreatedNotification 和 CGWindowList，而是定时直接用 AX 读取窗口并检查位置
+    /// RT160: workItems 保存到 axFallbackWorkItems，stopMonitoring 时可取消
+    private func scheduleAXFallbackMove(pid: pid_t, targetFrame: CGRect, delays: [TimeInterval]) {
+        for delay in delays {
+            let item = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                // 窗口已经不在运行或已搬到目标屏则跳过
+                guard NSRunningApplication(processIdentifier: pid) != nil else { return }
+                let appElement = AXUIElementCreateApplication(pid)
+                var windowsValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+                      let axWindows = windowsValue as? [AXUIElement], !axWindows.isEmpty else {
+                    logger.info("AX 兜底: 未获取到窗口 pid=\(pid, privacy: .public)")
+                    return
+                }
+                guard let mainWindow = self.pickMainWindow(from: axWindows) else {
+                    logger.info("AX 兜底: 挑不出主窗口 pid=\(pid, privacy: .public)")
+                    return
+                }
+                var positionValue: CFTypeRef?
+                var sizeValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(mainWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
+                      AXUIElementCopyAttributeValue(mainWindow, kAXSizeAttribute as CFString, &sizeValue) == .success else {
+                    return
+                }
+                var currentPosition = CGPoint.zero
+                var currentSize = CGSize.zero
+                AXValueGetValue(positionValue as! AXValue, .cgPoint, &currentPosition)
+                AXValueGetValue(sizeValue as! AXValue, .cgSize, &currentSize)
+                let currentBounds = CGRect(origin: currentPosition, size: currentSize)
+                if self.isBoundsInTargetFrame(currentBounds, targetFrame: targetFrame) {
+                    logger.info("AX 兜底: 窗口已在目标屏幕 pid=\(pid, privacy: .public)")
+                    return
+                }
+                logger.info("AX 兜底: 窗口不在目标屏幕，执行搬窗 pid=\(pid, privacy: .public) current=\(NSStringFromRect(currentBounds), privacy: .public) target=\(NSStringFromRect(targetFrame), privacy: .public)")
+                self.hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                    self?.startStabilityCheck(pid: pid, targetFrame: targetFrame)
+                }
+            }
+            axFallbackWorkItems.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
     }
     
     /// 设置 AX 窗口的 hidden 属性
@@ -678,12 +743,25 @@ class WindowMover: ObservableObject {
     /// 100ms 后兜底重试一次，避免窗口永久不可见。
     /// hide 之前会先校验窗口仍可访问（位置属性可读），已被销毁的窗口不参与 hide。
     /// RT5: unhide retry 的 workItem 在执行完成后自清理；移动 cooldown 用 cooldownKey(...) 统一生成 key
+    /// FIX-启动不搬窗: 对不支持 hidden 属性的 App（如微信），hidden 设置失败后直接走 move-only 路径
     private func hideMoveUnhide(axWindows: [AXUIElement], targetFrame: CGRect) {
         // 1) 仅对"还活着"的窗口走 hide 路径，已销毁的窗口直接跳过
         let alive: [AXUIElement] = axWindows.filter { isAXWindowAlive($0) }
-        for window in alive { setAXWindowHidden(window, hidden: true) }
-        for window in alive { moveWindowToFrameImmediate(window, targetFrame: targetFrame) }
+
+        // FIX-启动不搬窗: 记录 hidden 设置是否成功，失败的窗口直接 move 不尝试 unhide
+        var hiddenSucceeded: [AXUIElement: Bool] = [:]
         for window in alive {
+            let ok = setAXWindowHidden(window, hidden: true)
+            hiddenSucceeded[window] = ok
+            if !ok {
+                logger.debug("hideMoveUnhide: hidden=true 设置失败，该窗口将走 move-only")
+            }
+        }
+
+        for window in alive { moveWindowToFrameImmediate(window, targetFrame: targetFrame) }
+
+        for window in alive {
+            guard hiddenSucceeded[window] == true else { continue }
             if !setAXWindowHidden(window, hidden: false) {
                 let key = cooldownKey(axWindow: window)
                 // RT5: 覆盖前先取消旧 workItem，避免旧的不必要的执行
@@ -1021,10 +1099,23 @@ class WindowMover: ObservableObject {
             // hide → move → unhide，让用户看不到"错误屏幕位置"那一两帧
             hideMoveUnhide(axWindows: [axWindow], targetFrame: targetFrame)
         } else {
-            // R-150: AX 拿不到这个具体窗口时 silent return——多窗口 App 的其他窗口
-            //        不应被批量搬动到 targetFrame 中心点导致重叠
-            // P2: 改用 Logger——热路径日志懒插值
-            logger.error("onWindowDetected(CG) matchAXWindow 失败: pid=\(pid) initialBounds=\(NSStringFromRect(initialBounds), privacy: .public), 放弃搬动")
+            // FIX-启动不搬窗: CG/AX 精确匹配失败时（如微信），回退到 pickMainWindow
+            //   从 AX 窗口列表中挑主窗口搬动，与 onWindowDetected(AX) 路径保持一致
+            logger.warning("onWindowDetected(CG) matchAXWindow 失败，回退 pickMainWindow: pid=\(pid) initialBounds=\(NSStringFromRect(initialBounds), privacy: .public)")
+            let appElement = AXUIElementCreateApplication(pid)
+            var windowsValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+               let axWindows = windowsValue as? [AXUIElement] {
+                let titlePattern = activeDetections[pid]?.titlePattern
+                let filteredWindows = filterWindowsByTitle(axWindows, pattern: titlePattern)
+                if let mainWindow = pickMainWindow(from: filteredWindows) {
+                    hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
+                } else {
+                    logger.error("onWindowDetected(CG) 回退 pickMainWindow 也失败: pid=\(pid), 放弃搬动")
+                }
+            } else {
+                logger.error("onWindowDetected(CG) matchAXWindow 失败且 AX 窗口列表获取失败: pid=\(pid), 放弃搬动")
+            }
         }
 
         // RT2: 延迟 120ms 让 unhide 100ms 重试先完成，避免"刚搬完又再搬一次"回弹
@@ -1182,14 +1273,21 @@ class WindowMover: ObservableObject {
             } else {
                 self.stabilityCount[pid] = 0
                 // 回弹：重新搬（hide → move → unhide）
-                // R-184: matchAXWindow 拿不到时 silent return——避免多窗口 App（IDE）误搬辅助窗口
                 if let bounds = currentBounds,
                    let axWindow = self.matchAXWindow(for: pid, targetBounds: bounds) {
                     self.hideMoveUnhide(axWindows: [axWindow], targetFrame: targetFrame)
-                } else {
-                    // R-184: 拿不到具体窗口时 silent return，不再回退搬动所有 AX 窗口或调老路径
-                    // P2: 改用 Logger——热路径日志懒插值
-                    logger.error("startStabilityCheck 回弹: matchAXWindow 失败: pid=\(pid), 放弃重新搬动")
+                } else if let bounds = currentBounds {
+                    // RT153: matchAXWindow 精确匹配失败时，回退到 pickMainWindow 兜底
+                    //   与 onWindowDetected(CG) 路径保持一致
+                    let appElement = AXUIElementCreateApplication(pid)
+                    var windowsValue: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+                       let axWindows = windowsValue as? [AXUIElement],
+                       let mainWindow = self.pickMainWindow(from: axWindows) {
+                        self.hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
+                    } else {
+                        logger.error("startStabilityCheck 回弹: matchAXWindow 和 pickMainWindow 均失败: pid=\(pid), 放弃重新搬动")
+                    }
                 }
             }
         }
@@ -1223,7 +1321,39 @@ class WindowMover: ObservableObject {
         let intersectionArea = intersection.width * intersection.height
         return intersectionArea / windowArea
     }
-    
+
+    /// FIX-启动不搬窗: CGWindowList 看不到窗口时，直接通过 AX API 获取并搬动窗口
+    /// - Returns: 是否成功找到并尝试搬动至少一个 AX 窗口
+    /// RT161: 只搬主窗口（与 onWindowDetected(AX) 路径一致），
+    ///        避免多窗口 App 的辅助窗口被误搬
+    private func moveAXWindowsToTargetFrame(for pid: pid_t, targetFrame: CGRect) -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowsValue: CFTypeRef?
+        let axResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
+        guard axResult == .success, let axWindows = windowsValue as? [AXUIElement], !axWindows.isEmpty else {
+            return false
+        }
+
+        // RT161: 只挑主窗口搬动，不搬辅助窗口
+        guard let mainWindow = pickMainWindow(from: axWindows) else {
+            return false
+        }
+
+        // 校验主窗口仍可访问
+        guard isAXWindowAlive(mainWindow) else { return false }
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(mainWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
+              positionValue != nil,
+              AXUIElementCopyAttributeValue(mainWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              sizeValue != nil else { return false }
+
+        logger.debug("启动搬窗: AX 直接搬主窗口 pid=\(pid, privacy: .public)")
+        hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
+        startStabilityCheck(pid: pid, targetFrame: targetFrame)
+        return true
+    }
+
     func configure(modelContext: ModelContext) {
         self.modelContext = modelContext
     }
@@ -1237,6 +1367,10 @@ class WindowMover: ObservableObject {
         }
 
         isMonitoring = true
+
+        // FIX-启动不搬窗: 在 startMonitoring 中注册应用启动监听，确保不丢失 SwallowScreen 启动后
+        //   1s 延迟期间发生的应用启动通知。去重：token 已存在则跳过。
+        setupAppLaunchObserver()
 
         // RT147: 入口完整状态重置，保证幂等（防止 stopMonitoring 中途失败时状态不一致）
         lastAppsFingerprint = 0
@@ -1282,6 +1416,7 @@ class WindowMover: ObservableObject {
     /// RT3: 改走 earlyWindowCatcher，与 handleAppLaunch 共享同一 hide/move/unhide + 稳态校验链路
     /// RT53: 改为 async，每批 earlyWindowCatcher 调用后 await Task.yield()，避免主 RunLoop 瞬时过载
     /// RT73: 每个 app 重新读 getCurrentScreenMappings()，启动期屏拓扑变化时仍能匹配最新屏幕
+    /// FIX-启动不搬窗: 改为直接搬窗逻辑，与 checkAndEnforcePinnedWindows 风格一致
     private func moveAllOpenAppsToAssignedScreens() async {
         guard let modelContext = modelContext else { return }
 
@@ -1290,7 +1425,7 @@ class WindowMover: ObservableObject {
         }
 
         // R-190: 谓词化——只拉启用 App，与 R-152 checkAndEnforcePinnedWindows 风格一致
-        //        for 循环 line 678 guard appInfo.isEnabled 仍保留作防御（SwiftData 谓词不强制收紧）
+        //        for 循环 guard appInfo.isEnabled 仍保留作防御（SwiftData 谓词不强制收紧）
         // R-214: FetchDescriptor 加 sortBy: \.bundleIdentifier——保证 fetch 顺序稳定
         let descriptor = FetchDescriptor<AppInfo>(
             predicate: #Predicate { $0.isEnabled == true },
@@ -1298,8 +1433,23 @@ class WindowMover: ObservableObject {
         )
         guard let allApps = try? modelContext.fetch(descriptor) else { return }
 
-        // RT53: 每批最多启动 5 个 earlyWindowCatcher 后让出主 RunLoop，
-        // 防止 N 个 app 配 N*3 个 DispatchSourceTimer 瞬时 fan-out
+        // FIX-启动不搬窗: 一次性获取所有 on-screen 主窗口，避免逐应用调用 CGWindowListCopyWindowInfo
+        let allMainWindows = fetchAllOnScreenMainWindows()
+
+        // FIX-启动不搬窗: 预构建 bundleID → pid 字典，避免循环内重复查找
+        let runningApps = NSWorkspace.shared.runningApplications
+        var bundleIDToPid: [String: pid_t] = [:]
+        var pidToApp: [pid_t: NSRunningApplication] = [:]
+        for app in runningApps {
+            if let bid = app.bundleIdentifier {
+                bundleIDToPid[bid] = app.processIdentifier
+            }
+            pidToApp[app.processIdentifier] = app
+        }
+
+        let currentScreens = getCurrentScreenMappings()
+
+        // RT53: 每批最多处理 5 个 app 后让出主 RunLoop
         let batchSize = 5
         var processedInBatch = 0
 
@@ -1308,27 +1458,41 @@ class WindowMover: ObservableObject {
             guard appInfo.isEnabled else { continue }
             guard appInfo.targetScreenID != nil || appInfo.targetScreenSerialNumber != nil || appInfo.targetScreenName != nil else { continue }
 
-            // RT73: 每个 app 重新读 currentScreens
-            let currentScreens = getCurrentScreenMappings()
-
             // RT69: 走 resolveTargetFrame helper
             guard let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) else {
                 // RT31: 同上，moveAllOpenAppsToAssignedScreens 路径也要打日志
-                // P2: 改用 Logger——热路径日志懒插值
                 logger.error("未找到 App 配置的目标屏幕（启动时）: bundleID=\(appInfo.bundleIdentifier, privacy: .public) targetScreenID=\(String(describing: appInfo.targetScreenID), privacy: .public) targetScreenSerialNumber=\(appInfo.targetScreenSerialNumber ?? "<nil>", privacy: .public) targetScreenName=\(appInfo.targetScreenName ?? "<nil>", privacy: .public)")
                 continue
             }
 
-            // 找到运行中的应用并移动（走与 handleAppLaunch 相同的早期检测入口）
-            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first {
-                let pid = app.processIdentifier
-                earlyWindowCatcher(pid: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
-                processedInBatch += 1
-                if processedInBatch >= batchSize {
-                    processedInBatch = 0
-                    // RT53: 让出主 RunLoop，避免 detection timer 全部堆积
-                    await Task.yield()
+            // FIX-启动不搬窗: 从预构建字典查找 pid
+            guard let pid = bundleIDToPid[appInfo.bundleIdentifier] else { continue }
+
+            if let bounds = allMainWindows[pid] {
+                // 有可见窗口——直接判断位置
+                if isBoundsInTargetFrame(bounds, targetFrame: resolved.visibleFrame) {
+                    // 窗口已在目标屏幕——跳过
+                    logger.debug("启动搬窗: 已在目标屏幕，跳过: bundleID=\(appInfo.bundleIdentifier, privacy: .public)")
+                    continue
                 }
+                // 窗口不在目标屏幕——复用 checkWindowPosition 直接搬窗
+                logger.info("启动搬窗: 调用 checkWindowPosition: bundleID=\(appInfo.bundleIdentifier, privacy: .public) screenID=\(resolved.id) targetFrame=\(NSStringFromRect(resolved.visibleFrame), privacy: .public)")
+                checkWindowPosition(pid: pid, screenFrame: resolved.frame, targetFrame: resolved.visibleFrame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id, prebuiltMainBounds: bounds)
+            } else {
+                // FIX-启动不搬窗: CGWindowList 看不到窗口时，直接通过 AX 获取窗口并搬动
+                logger.debug("启动搬窗: CG 无可见窗口，尝试 AX 直接搬窗: bundleID=\(appInfo.bundleIdentifier, privacy: .public)")
+                if !moveAXWindowsToTargetFrame(for: pid, targetFrame: resolved.visibleFrame) {
+                    // AX 也拿不到窗口时，才回退到 earlyWindowCatcher 兜底
+                    logger.debug("启动搬窗: AX 也无窗口，earlyWindowCatcher 兜底: bundleID=\(appInfo.bundleIdentifier, privacy: .public)")
+                    earlyWindowCatcher(pid: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
+                }
+            }
+
+            processedInBatch += 1
+            if processedInBatch >= batchSize {
+                processedInBatch = 0
+                // RT53: 让出主 RunLoop，避免 detection timer 全部堆积
+                await Task.yield()
             }
         }
     }
@@ -1352,18 +1516,24 @@ class WindowMover: ObservableObject {
         stabilityCount.removeAll()
         for item in cooldownWorkItems.values { item.cancel() }
         cooldownWorkItems.removeAll()
+        // RT160: 取消 AX 兜底延迟任务
+        for item in axFallbackWorkItems { item.cancel() }
+        axFallbackWorkItems.removeAll()
         lastAppsFingerprint = 0
         cachedPinnedApps = []
         // AXObserver 清理
+        // RT157: 使用 CFRunLoopGetMain() 而非 CFRunLoopGetCurrent()，
+        //        source 加在主 RunLoop 上，必须从主 RunLoop 移除
+        let mainRunLoop = CFRunLoopGetMain()
         for (_, source) in axRunLoopSources {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
+            CFRunLoopRemoveSource(mainRunLoop, source, .defaultMode)
         }
         axRunLoopSources.removeAll()
         axObservers.removeAll()
         pendingAXObservations.removeAll()
         // pinToScreen observer 清理
         for (_, source) in pinRunLoopSources {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
+            CFRunLoopRemoveSource(mainRunLoop, source, .defaultMode)
         }
         pinRunLoopSources.removeAll()
         pinObservers.removeAll()
