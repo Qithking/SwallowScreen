@@ -76,6 +76,8 @@ struct DownloadWindowContentView: View {
     @State private var downloadProgress: Double = 0
     @State private var downloadStatus: DownloadStatus = .downloading
     @State private var errorMessage: String = ""
+    // 下载完成后保存文件 URL，供"安装并重启"使用
+    @State private var downloadedFileURL: URL?
 
     // T23: 持有对自己窗口的弱引用，避免 closeWindow 误关其他窗口
     @Environment(\.dismissWindow) private var dismissWindow
@@ -152,6 +154,10 @@ struct DownloadWindowContentView: View {
                         Text("正在下载更新文件...")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                    } else if downloadStatus == .completed {
+                        Text("下载完成，点击安装并重启以更新应用")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -173,6 +179,18 @@ struct DownloadWindowContentView: View {
                         Button(action: startDownload) {
                             Label("重试", systemImage: "arrow.clockwise")
                                 .frame(minWidth: 60)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    } else if downloadStatus == .completed {
+                        Button(action: openDownloadedFile) {
+                            Text("稍后安装")
+                                .frame(minWidth: 70)
+                        }
+                        .buttonStyle(.bordered)
+
+                        Button(action: installAndRelaunch) {
+                            Label("安装并重启", systemImage: "arrow.triangle.2.circlepath")
+                                .frame(minWidth: 90)
                         }
                         .buttonStyle(.borderedProminent)
                     }
@@ -214,13 +232,9 @@ struct DownloadWindowContentView: View {
                 self.downloadProgress = progress
             },
             onComplete: { localURL in
-                if let url = localURL {
-                    NSWorkspace.shared.open(url)
-                }
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                    self.closeWindow()
-                }
+                // 保存下载文件 URL，供"安装并重启"使用
+                self.downloadedFileURL = localURL
+                self.downloadStatus = .completed
             },
             onError: { error in
                 self.downloadStatus = .failed
@@ -242,6 +256,19 @@ struct DownloadWindowContentView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(downloadURL.absoluteString, forType: .string)
+    }
+
+    /// 安装新版本并重启应用
+    private func installAndRelaunch() {
+        guard let fileURL = downloadedFileURL else { return }
+        RelaunchManager.shared.installAndRelaunch(from: fileURL)
+    }
+
+    /// 直接打开下载的文件（降级方案，让用户手动安装）
+    private func openDownloadedFile() {
+        guard let fileURL = downloadedFileURL else { return }
+        NSWorkspace.shared.open(fileURL)
+        closeWindow()
     }
 
     private func closeWindow() {
