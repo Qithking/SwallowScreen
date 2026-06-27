@@ -744,7 +744,7 @@ class WindowMover: ObservableObject {
     /// hide 之前会先校验窗口仍可访问（位置属性可读），已被销毁的窗口不参与 hide。
     /// RT5: unhide retry 的 workItem 在执行完成后自清理；移动 cooldown 用 cooldownKey(...) 统一生成 key
     /// FIX-启动不搬窗: 对不支持 hidden 属性的 App（如微信），hidden 设置失败后直接走 move-only 路径
-    private func hideMoveUnhide(axWindows: [AXUIElement], targetFrame: CGRect) {
+    private func hideMoveUnhide(axWindows: [AXUIElement], targetFrame: CGRect, prebuiltSize: CGSize? = nil) {
         // 1) 仅对"还活着"的窗口走 hide 路径，已销毁的窗口直接跳过
         let alive: [AXUIElement] = axWindows.filter { isAXWindowAlive($0) }
 
@@ -758,26 +758,57 @@ class WindowMover: ObservableObject {
             }
         }
 
-        for window in alive { moveWindowToFrameImmediate(window, targetFrame: targetFrame) }
+        // 2) Move: 居中放置（moveWindowToFrameImmediate 内部做 BL→TL 转换）
+        for window in alive {
+            moveWindowToFrameImmediate(window, targetFrame: targetFrame, prebuiltSize: prebuiltSize)
+        }
 
+        // 3) Unhide: 恢复窗口可见
         for window in alive {
             guard hiddenSucceeded[window] == true else { continue }
             if !setAXWindowHidden(window, hidden: false) {
                 let key = cooldownKey(axWindow: window)
-                // RT5: 覆盖前先取消旧 workItem，避免旧的不必要的执行
                 cooldownWorkItems[key]?.cancel()
                 let workItem = DispatchWorkItem { [weak self] in
-                    // P3: 检查窗口是否仍然存活——避免对已销毁窗口执行 unhide
                     guard let self = self, self.isAXWindowAlive(window) else {
                         self?.cooldownWorkItems.removeValue(forKey: key)
                         return
                     }
                     self.setAXWindowHidden(window, hidden: false)
-                    // RT5: unhide retry 自清理 dict
                     self.cooldownWorkItems.removeValue(forKey: key)
                 }
                 cooldownWorkItems[key] = workItem
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
+            }
+        }
+
+        // 4) unhide 后位置验证：macOS 可能在 unhide 时"纠正" Y 坐标，延迟回读并修正
+        //    注: moveWindowToTargetScreen 的调用方已有 500ms 后的 verifyAndRecenterWindow，
+        //    此处仅做 150ms 快速验证作为额外保障（覆盖非 moveWindowToTargetScreen 的调用路径）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self = self else { return }
+            let visibleTL = self.visibleFrameToTL(targetFrame)
+            for window in alive {
+                guard self.isAXWindowAlive(window) else { continue }
+                var posValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
+                      let posVal = posValue else { continue }
+                var actualPos = CGPoint.zero
+                AXValueGetValue(posVal as! AXValue, .cgPoint, &actualPos)
+
+                // 用 visibleFrame 重新计算期望位置（与 moveWindowToFrameImmediate 一致）
+                let winSize = self.readWindowSizeFromAX(window, fallback: prebuiltSize)
+                guard winSize.width > 0, winSize.height > 0 else { continue }
+                let expectedY = visibleTL.origin.y + (visibleTL.height - winSize.height) / 2
+
+                if abs(actualPos.y - expectedY) > 2 {
+                    logger.warning("hideMoveUnhide: unhide 后 Y 被调整 actual=\(NSStringFromPoint(actualPos), privacy: .public) expectedY=\(expectedY, privacy: .public) → 重新设置")
+                    var pos = actualPos
+                    pos.y = expectedY
+                    if let posValue = AXValueCreate(.cgPoint, &pos) {
+                        AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, posValue)
+                    }
+                }
             }
         }
     }
@@ -1297,18 +1328,16 @@ class WindowMover: ObservableObject {
 
     /// 判断窗口是否"在目标屏合理位置"：窗口中心点在 visibleFrame 内 AND 窗口至少有 50% 在 visibleFrame 内
     /// FIX-自由移动: 改用"中心点 AND 50%面积"双条件判定
-    ///     旧逻辑 90% 面积重叠过严：窗口靠近菜单栏/Dock 时重叠率低于 90% 被误判为"不在目标屏"，
-    ///     导致 pinToScreen 应用在指定屏幕内也无法自由拖动。
-    ///     改为"中心点 AND 50%面积"：
-    ///     - 中心点：保证窗口主体在正确屏幕上不误判
-    ///     - 50% 面积：避免窗口被 macOS 调整到奇怪位置（中心点在内但窗口大部分在屏外）时不被检测
-    ///     50% 阈值允许窗口大部分超出 visibleFrame（如一半在屏外），但不会让窗口大部分在屏外
+    /// FIX-坐标系: bounds 来自 CGWindowList (TL, Y向下)，targetFrame 来自 NSScreen (BL, Y向上)。
+    ///   需将 targetFrame 转换为 TL 后再比较。X 轴两系统相同。
     private func isBoundsInTargetFrame(_ bounds: CGRect, targetFrame: CGRect) -> Bool {
+        // 将 visibleFrame 从 BL 转换为 TL
+        let targetFrameTL = visibleFrameToTL(targetFrame)
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         // 中心点在 visibleFrame 内——窗口主体在正确屏幕
-        guard targetFrame.contains(center) else { return false }
+        guard targetFrameTL.contains(center) else { return false }
         // 窗口至少有 50% 面积在 visibleFrame 内——窗口没有大部分在屏外
-        let overlapRatio = windowOverlapRatio(bounds, targetFrame: targetFrame)
+        let overlapRatio = windowOverlapRatio(bounds, targetFrame: targetFrameTL)
         return overlapRatio >= 0.5
     }
 
@@ -2150,7 +2179,36 @@ class WindowMover: ObservableObject {
         }
         return nil
     }
-    
+
+    // MARK: - 坐标系转换辅助
+    // macOS 存在两套坐标系:
+    //   BL (Bottom-Left): NSScreen.frame / NSScreen.visibleFrame / NSEvent.mouseLocation — Y 向上
+    //   TL (Top-Left):    AXUIElement kAXPositionAttribute / CGWindowList kCGWindowBounds — Y 向下
+    // X 轴两系统相同，只有 Y 需要转换。
+    // 转换公式: y_TL = primaryScreenHeight - y_BL
+    //   primaryScreenHeight = NSScreen.screens[0].frame.height (主屏幕永远是 screens[0])
+    // 多屏安全: 该公式是全局的，对所有屏幕（主屏/副屏）均适用。
+
+    /// 主屏幕高度（BL 坐标系的全局 Y 轴最大值）
+    private var primaryScreenHeight: CGFloat {
+        NSScreen.screens[0].frame.height
+    }
+
+    /// 将 BL 坐标系的 Y 值转换为 TL 坐标系
+    private func blToTL_Y(_ y_BL: CGFloat) -> CGFloat {
+        primaryScreenHeight - y_BL
+    }
+
+    /// 将 visibleFrame (BL) 转换为 TL 坐标系
+    private func visibleFrameToTL(_ frame: CGRect) -> CGRect {
+        CGRect(
+            x: frame.origin.x,
+            y: primaryScreenHeight - frame.maxY,  // BL 的 maxY = 顶部 → TL 的 origin.y
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
     /// FIX-正中: 优先从 AX 读取 size（content 实际尺寸，不含阴影），保证居中计算准确
     ///     CGWindowList bounds.size 在不同 macOS 版本/不同应用上可能包含窗口阴影，
     ///     用 AX size 才能保证 content 在 visibleFrame 几何中心。
@@ -2176,15 +2234,18 @@ class WindowMover: ObservableObject {
     private func moveWindowToTargetScreen(_ window: AXUIElement, screenFrame: CGRect, visibleFrame: CGRect, windowID: String, prebuiltSize: CGSize? = nil) {
         // FIX-正中5: 使用 hideMoveUnhide 替代直接 AX 设置
         //     启动期用 hideMoveUnhide 能正确居中，回弹期也应一致
-        hideMoveUnhide(axWindows: [window], targetFrame: visibleFrame)
+        // FIX-纵向偏移: 传入 prebuiltSize 作为 fallback，避免 AX size 读取失败
+        hideMoveUnhide(axWindows: [window], targetFrame: visibleFrame, prebuiltSize: prebuiltSize)
 
         lastMovedWindows.insert(windowID)
 
         // FIX-正中5: 回读窗口实际位置作为缓存（hideMoveUnhide 内部有 clamp，实际位置可能与理论计算不同）
+        // FIX-坐标系: expectedPos 用 TL 坐标系（与 AX position 一致）
         let actualSize = readWindowSizeFromAX(window, fallback: prebuiltSize)
+        let visibleTL = visibleFrameToTL(visibleFrame)
         let expectedPos = CGPoint(
-            x: visibleFrame.midX - actualSize.width / 2,
-            y: visibleFrame.midY - actualSize.height / 2
+            x: visibleTL.midX - actualSize.width / 2,
+            y: visibleTL.origin.y + (visibleTL.height - actualSize.height) / 2
         )
         // 尝试回读 AX 实际位置，失败时用计算值
         var actualPos = expectedPos
@@ -2220,6 +2281,7 @@ class WindowMover: ObservableObject {
     }
 
     /// FIX-正中5: 验证窗口是否在 visibleFrame 正中，如果偏离则用 hideMoveUnhide 重新居中
+    /// FIX-坐标系: AX 位置使用 TL (Y向下)，visibleFrame 使用 BL (Y向上)，需转换后比较
     private func verifyAndRecenterWindow(window: AXUIElement, visibleFrame: CGRect, windowID: String) {
         var currentPos = CGPoint.zero
         var posValue: CFTypeRef?
@@ -2230,15 +2292,18 @@ class WindowMover: ObservableObject {
         let useSize = readWindowSizeFromAX(window)
         guard useSize.width > 0, useSize.height > 0 else { return }
 
-        let visibleCenterX = visibleFrame.midX
-        let visibleCenterY = visibleFrame.midY
+        // X 轴两坐标系相同，直接比较；Y 轴需转换
+        let visibleTL = visibleFrameToTL(visibleFrame)
+        let visibleCenterX = visibleTL.midX
+        let visibleCenterY_TL = visibleTL.midY
         let currentCenterX = currentPos.x + useSize.width / 2
-        let currentCenterY = currentPos.y + useSize.height / 2
-        let isOffCenter = abs(currentCenterX - visibleCenterX) > 5 || abs(currentCenterY - visibleCenterY) > 5
+        let currentCenterY_TL = currentPos.y + useSize.height / 2
+
+        let isOffCenter = abs(currentCenterX - visibleCenterX) > 5 || abs(currentCenterY_TL - visibleCenterY_TL) > 5
 
         if isOffCenter {
-            logger.debug("verifyAndRecenterWindow: windowID=\(windowID, privacy: .public) currentCenter=\(NSStringFromPoint(CGPoint(x: currentCenterX, y: currentCenterY)), privacy: .public) visibleCenter=\(NSStringFromPoint(CGPoint(x: visibleCenterX, y: visibleCenterY)), privacy: .public) useSize=\(NSStringFromSize(useSize), privacy: .public) → recentering")
-            hideMoveUnhide(axWindows: [window], targetFrame: visibleFrame)
+            logger.warning("verifyAndRecenterWindow: 偏离中心! windowID=\(windowID, privacy: .public) dy=\(currentCenterY_TL - visibleCenterY_TL, privacy: .public) useSize=\(NSStringFromSize(useSize), privacy: .public) currentPos=\(NSStringFromPoint(currentPos), privacy: .public) → recentering")
+            hideMoveUnhide(axWindows: [window], targetFrame: visibleFrame, prebuiltSize: useSize)
         }
     }
     
@@ -2277,36 +2342,57 @@ class WindowMover: ObservableObject {
     }
 
     /// 移动窗口到指定位置（居中）
-    private func moveWindowToFrameImmediate(_ window: AXUIElement, targetFrame: CGRect) {
-        var sizeValue: CFTypeRef?
-        AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue)
-        
-        var size = CGSize.zero
-        if let sizeVal = sizeValue {
-            AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+    /// 坐标系：macOS 左下角原点，Y 轴向上。kAXPositionAttribute = 窗口左下角坐标。
+    /// size 获取优先级：prebuiltSize > AX kAXSizeAttribute > CGWindowList bounds.size
+    private func moveWindowToFrameImmediate(_ window: AXUIElement, targetFrame: CGRect, prebuiltSize: CGSize? = nil) -> CGPoint? {
+        // FIX-纵向偏移: 多层 fallback 获取窗口尺寸
+        //   1. prebuiltSize（调用方传入的 CGWindowList bounds.size，最可靠）
+        //   2. AX kAXSizeAttribute（可能返回 0 或不含标题栏的值）
+        //   3. CGWindowList 查询（通过 AXUIElementGetPid 获取 pid 后查询）
+        var size = readWindowSizeFromAX(window, fallback: prebuiltSize)
+
+        if size.width <= 0 || size.height <= 0 {
+            // AX size 失效——通过 pid 查 CGWindowList 获取真实 bounds
+            var pid: pid_t = 0
+            if AXUIElementGetPid(window, &pid) == .success, pid > 0 {
+                if let cgBounds = findOnScreenWindow(for: pid) {
+                    size = cgBounds.size
+                    logger.info("moveWindowToFrameImmediate: AX size 失效，回退 CGWindowList size=\(NSStringFromSize(size), privacy: .public) pid=\(pid, privacy: .public)")
+                }
+            }
+            if size.width <= 0 || size.height <= 0 {
+                logger.error("moveWindowToFrameImmediate: 所有 size 获取方式均失败，放弃居中")
+                return nil
+            }
         }
-        
+
+        // 坐标系转换: visibleFrame (BL) → TL，与 AX position 同系
+        let visibleTL = visibleFrameToTL(targetFrame)
+
         var newPosition = CGPoint(
             x: targetFrame.origin.x + (targetFrame.width - size.width) / 2,
-            y: targetFrame.origin.y + (targetFrame.height - size.height) / 2
+            y: visibleTL.origin.y + (visibleTL.height - size.height) / 2
         )
 
-        // FIX-居中偏移: clamp 确保窗口完全在 targetFrame 内
+        // clamp 确保窗口完全在可见区域内 (TL 坐标系)
         if size.width > targetFrame.width {
             newPosition.x = targetFrame.origin.x
         } else {
             newPosition.x = max(targetFrame.origin.x, min(newPosition.x, targetFrame.maxX - size.width))
         }
         if size.height > targetFrame.height {
-            newPosition.y = targetFrame.origin.y
+            newPosition.y = visibleTL.origin.y
         } else {
-            newPosition.y = max(targetFrame.origin.y, min(newPosition.y, targetFrame.maxY - size.height))
+            newPosition.y = max(visibleTL.origin.y, min(newPosition.y, visibleTL.maxY - size.height))
         }
+
+        logger.debug("moveWindowToFrameImmediate: targetFrame(BL)=\(NSStringFromRect(targetFrame), privacy: .public) visibleTL=\(NSStringFromRect(visibleTL), privacy: .public) winSize=\(NSStringFromSize(size), privacy: .public) → newPos(TL)=\(NSStringFromPoint(newPosition), privacy: .public)")
 
         var position = newPosition
         if let positionValue = AXValueCreate(.cgPoint, &position) {
             AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, positionValue)
         }
+        return newPosition
     }
     
     func checkAccessibilityPermission() -> Bool {
