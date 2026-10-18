@@ -364,6 +364,66 @@ delete_tag() {
     fi
 }
 
+# 将远程 beta 分支推送到 main 分支
+push_beta_to_main() {
+    echo ""
+    echo "=== 推送 beta 到 main 分支 ==="
+    echo ""
+
+    # 检查远程仓库
+    remote_name=$(git remote 2>/dev/null | head -1)
+    if [ -z "$remote_name" ]; then
+        echo_error "未找到远程仓库"
+        exit 1
+    fi
+    echo_info "检测到远程仓库: $remote_name"
+
+    # 先拉取远程 beta 最新状态——推送的是远程 beta 的代码，本地未推送的提交不包含
+    echo_info "拉取远程 beta 最新代码..."
+    if ! git fetch "$remote_name" beta 2>/dev/null; then
+        echo_error "远程不存在 beta 分支，无法推送"
+        exit 1
+    fi
+
+    # 检查远程 main 是否存在（首次发布时 main 可能还没有）
+    local has_main=false
+    if git ls-remote --heads "$remote_name" main | grep -q main; then
+        has_main=true
+    fi
+
+    # 预览 beta 相对 main 的新增提交，让用户确认推送内容
+    if [ "$has_main" = true ]; then
+        new_commits=$(git log --oneline "$remote_name/main..$remote_name/beta" 2>/dev/null | head -10)
+        if [ -z "$new_commits" ]; then
+            echo_info "远程 beta 与 main 无差异，无需推送"
+            return
+        fi
+        echo ""
+        echo_info "beta 相对 main 的新提交（最多显示 10 条）:"
+        echo "$new_commits"
+    else
+        echo_warning "远程尚无 main 分支，将首次创建 main"
+    fi
+
+    echo ""
+    read -p "确认将 $remote_name/beta 推送到 $remote_name/main? (y/n): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo_info "已取消"
+        return
+    fi
+
+    # refspec: origin/beta → main；推送失败时不强推，提示需先同步分支
+    echo ""
+    echo_info "推送到 $remote_name/main..."
+    if git push "$remote_name" "$remote_name/beta:main" 2>&1; then
+        echo_success "已将 beta 推送到 main!"
+        echo_info "GitHub Actions 将自动开始构建 DMG（如有该触发规则）"
+    else
+        echo_error "推送失败——可能远程 main 有 beta 没有的提交（需先同步分支）"
+        echo_info "请手动检查: git fetch $remote_name main && git log $remote_name/beta..$remote_name/main"
+    fi
+}
+
 # 重新触发最新版本的 GitHub Actions
 rerun_latest_action() {
     echo ""
@@ -434,6 +494,7 @@ show_menu() {
     echo "║  4. 清除失败的 GitHub Actions                    ║"
     echo "║  5. 删除指定 Tag                                 ║"
     echo "║  6. 重新触发最新版本 GitHub Actions             ║"
+    echo "║  7. 推送 beta 到 main 分支                      ║"
     echo "║  0. 退出                                          ║"
     echo "╚══════════════════════════════════════════════════╝"
     echo ""
@@ -445,8 +506,8 @@ main() {
     
     while true; do
         show_menu
-        read -p "请选择操作 (0-6): " choice
-        
+        read -p "请选择操作 (0-7): " choice
+
         case $choice in
             1)
                 push_to_github
@@ -466,12 +527,15 @@ main() {
             6)
                 rerun_latest_action
                 ;;
+            7)
+                push_beta_to_main
+                ;;
             0)
                 echo_info "再见!"
                 exit 0
                 ;;
             *)
-                echo_error "无效选择，请输入 0-6"
+                echo_error "无效选择，请输入 0-7"
                 ;;
         esac
         
