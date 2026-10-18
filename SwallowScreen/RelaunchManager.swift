@@ -115,9 +115,21 @@ final class RelaunchManager {
             exit 1
         fi
 
-        # 删除旧版本并复制新版本
-        rm -rf "\(targetAppPath)"
-        cp -R "$APP_PATH" "\(targetAppPath)"
+        # FIX-无回滚: 先复制到临时名，复制成功后再原子替换——
+        # 避免 rm 后 cp 失败（磁盘满/权限）导致应用丢失且无法恢复
+        rm -rf "\(targetAppPath).new" "\(targetAppPath).old"
+        cp -R "$APP_PATH" "\(targetAppPath).new"
+        if [ $? -ne 0 ]; then
+            hdiutil detach "$MOUNT_POINT" -quiet
+            rm -rf "\(targetAppPath).new"
+            echo "复制新版本失败，已保留旧版本" >&2
+            exit 1
+        fi
+
+        # 同卷 rename 原子替换，旧版本暂存 .old，新版本就位后再删除
+        mv "\(targetAppPath)" "\(targetAppPath).old" 2>/dev/null
+        mv "\(targetAppPath).new" "\(targetAppPath)"
+        rm -rf "\(targetAppPath).old"
 
         # 卸载 DMG
         hdiutil detach "$MOUNT_POINT" -quiet
@@ -152,9 +164,20 @@ final class RelaunchManager {
             exit 1
         fi
 
-        # 删除旧版本并复制新版本
-        rm -rf "\(targetAppPath)"
-        cp -R "$APP_PATH" "\(targetAppPath)"
+        # FIX-无回滚: 先复制到临时名，复制成功后再原子替换——
+        # 避免 rm 后 cp 失败（磁盘满/权限）导致应用丢失且无法恢复
+        rm -rf "\(targetAppPath).new" "\(targetAppPath).old"
+        cp -R "$APP_PATH" "\(targetAppPath).new"
+        if [ $? -ne 0 ]; then
+            rm -rf "\(targetAppPath).new" "$TMP_DIR"
+            echo "复制新版本失败，已保留旧版本" >&2
+            exit 1
+        fi
+
+        # 同卷 rename 原子替换，旧版本暂存 .old，新版本就位后再删除
+        mv "\(targetAppPath)" "\(targetAppPath).old" 2>/dev/null
+        mv "\(targetAppPath).new" "\(targetAppPath)"
+        rm -rf "\(targetAppPath).old"
 
         # 清理临时目录
         rm -rf "$TMP_DIR"

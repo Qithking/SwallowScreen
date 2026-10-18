@@ -177,37 +177,9 @@ class AppManager: ObservableObject {
     }
 
     /// 同步加载图标（M3: 限制为单一目标尺寸的 NSImage，内存占用最优）
-    /// 旧实现 `NSWorkspace.shared.icon(forFile:)` 返回的 NSImage 包含 16/32/128/256/512/1024 等多尺寸 representation，
-    /// 单图实际内存 50-200KB。新实现只保留 24×24 单一表示，单图 ~10-20KB。
-    /// 实现思路：用 CGImageSource 取最大尺寸 → CGImage → 缩放到 24x24 → 包成 NSImage
+    /// FIX-#12: 原 CGImageSource→CGContext 路径对 .app bundle 目录必然失败（ImageIO 无法解码目录），
+    ///          是从未生效的死分支——调用方传入的 path 均为 .app 目录，直接走 NSWorkspace API
     nonisolated private static func loadIconSync(at path: String) -> NSImage? {
-        let targetSize = NSSize(width: 24, height: 24)
-        // R-M3-rev: macOS 26 SDK 下 `bestRepresentation(for:context:hints:)` 签名变更，
-        // 改用 CGImageSource 直接解码 → 单一 CGImage → NSImage，绕开 NSImage 内部 representations 缓存
-        let url = URL(fileURLWithPath: path) as CFURL
-        if let source = CGImageSourceCreateWithURL(url, nil),
-           let fullImage = CGImageSourceCreateImageAtIndex(source, 0, nil) {
-            // 缩放到 24x24——单 CGImage，NSImage 只持一份 representation
-            let width = Int(targetSize.width)
-            let height = Int(targetSize.height)
-            if let context = CGContext(
-                data: nil,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: 0,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-            ) {
-                context.interpolationQuality = .high
-                context.draw(fullImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-                if let scaledCGImage = context.makeImage() {
-                    return NSImage(cgImage: scaledCGImage, size: targetSize)
-                }
-            }
-            return NSImage(cgImage: fullImage, size: targetSize)
-        }
-        // 兜底：NSWorkspace API 在 macOS 各版本稳定，但可能保留多 representations
         return NSWorkspace.shared.icon(forFile: path)
     }
 

@@ -98,7 +98,11 @@ class WindowMover: ObservableObject {
     // FIX-响应慢: 缓存 pid → 主窗口 AXUIElement 引用，避免每次 kAXWindowsAttribute 查询（~5-15ms）
     private var pinWindowCache: [pid_t: AXUIElement] = [:]
     // FIX-响应慢: 缓存 pid → 窗口尺寸，避免每次 kAXSizeAttribute 查询（~3-5ms）
-    private var pinWindowSizeCache: [pid_t: CGSize] = [:]
+    // FIX-#5: 附带缓存时间戳——窗口 resize 后陈旧尺寸会导致 isBoundsInTargetFrame
+    //         中心点误判与搬动 prebuiltSize 错误，超过 TTL 强制重读刷新
+    private var pinWindowSizeCache: [pid_t: (size: CGSize, cachedAt: Date)] = [:]
+    /// FIX-#5: pinWindowSizeCache 过期时长
+    private static let pinWindowSizeCacheTTL: TimeInterval = 5.0
 
     // FIX-拖拽检测: 拖拽中通过 isMouseLeftButtonDown() 检测鼠标状态，
     // 鼠标按下时记录 pid，等全局 leftMouseUp 事件触发后立即回弹
@@ -106,6 +110,8 @@ class WindowMover: ObservableObject {
     private var globalMouseUpMonitor: Any? = nil
     // RT160: scheduleAXFallbackMove 的延迟 workItems，stopMonitoring 时可取消
     private var axFallbackWorkItems: [DispatchWorkItem] = []
+    // FIX-#4: AXObserver 空闲超时 workItems——标题永不匹配时防止 observer 永久挂起
+    private var axObserverTimeoutItems: [pid_t: DispatchWorkItem] = [:]
 
     init() {
         _ = checkAccessibilityPermission()
@@ -167,6 +173,8 @@ class WindowMover: ObservableObject {
         for item in cooldownWorkItems.values { item.cancel() }
         // RT160: 取消 AX 兜底延迟任务
         for item in axFallbackWorkItems { item.cancel() }
+        // FIX-#4: 取消 AXObserver 空闲超时任务
+        for item in axObserverTimeoutItems.values { item.cancel() }
     }
 
     /// C3: 监听 .screenConfigurationChanged 屏变化事件——失效屏幕缓存
@@ -254,6 +262,8 @@ class WindowMover: ObservableObject {
 
         axObservers[pid] = observer
         axRunLoopSources[pid] = runLoopSource
+        // FIX-#4: 注册成功即启动空闲超时——永不匹配时最终清理 observer
+        scheduleAXObserverTimeout(for: pid)
         logger.debug("AXObserver 已创建: pid=\(pid)")
     }
 
@@ -298,15 +308,16 @@ class WindowMover: ObservableObject {
         guard !matchedWindows.isEmpty else {
             logger.debug("AXObserver 窗口标题不匹配 pattern: pid=\(pid) pattern=\(titlePattern ?? "<nil>", privacy: .public)")
             // 标题不匹配时不取消 observer，等待后续窗口创建
+            // FIX-#4: 刷新空闲超时计时——最后一次事件后 15s 仍无匹配则清理，防永久挂起
+            scheduleAXObserverTimeout(for: pid)
             return
         }
 
-        // 取消兜底轮询 timer（AXObserver 已先命中）
-        if let context = activeDetections[pid] {
-            context.cancel()
-            activeDetections.removeValue(forKey: pid)
-        }
-        stabilityCount.removeValue(forKey: pid)
+        // 停止兜底轮询 timer 但保留 context——0.12s 后 startStabilityCheck 需要
+        // originalLaunchDate 做 PID 复用防御（与轮询链 onWindowDetected 模式一致）。
+        // FIX-稳定性校验失效: 原先这里 context.cancel() + removeValue 导致 startStabilityCheck
+        // 开头 guard 必然失败，AXObserver 主路径搬窗后防回弹校验从未启动
+        stopDetectionTimers(pid: pid)
 
         // 搬动匹配的窗口
         hideMoveUnhide(axWindows: matchedWindows, targetFrame: targetFrame)
@@ -319,6 +330,8 @@ class WindowMover: ObservableObject {
         // 清理 observer（窗口创建通知只需一次）
         removeAXObserver(for: pid)
         pendingAXObservations.removeValue(forKey: pid)
+        // FIX-#4: 正常命中，取消空闲超时计时
+        cancelAXObserverTimeout(for: pid)
     }
 
     /// 移除指定 pid 的 AXObserver + RunLoopSource
@@ -334,6 +347,32 @@ class WindowMover: ObservableObject {
             AXObserverRemoveNotification(observer, appElement, kAXWindowCreatedNotification as CFString)
             axObservers.removeValue(forKey: pid)
         }
+    }
+
+    /// FIX-#4: 观察者空闲超时——最后一次窗口创建事件后 N 秒仍无匹配窗口则清理，
+    /// 防止 windowTitlePattern 配错 / 永不匹配导致 observer + pendingAXObservations 永久挂起
+    private static let axObserverIdleTimeout: TimeInterval = 15.0
+
+    /// FIX-#4: 调度（或刷新）观察者空闲超时计时
+    private func scheduleAXObserverTimeout(for pid: pid_t) {
+        axObserverTimeoutItems[pid]?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.axObserverTimeoutItems.removeValue(forKey: pid)
+            // observation 已不存在 = 已命中清理或 App 已退出，无需处理
+            guard self.pendingAXObservations[pid] != nil else { return }
+            self.logger.info("AXObserver 空闲超时，清理观察者: pid=\(pid, privacy: .public)")
+            self.removeAXObserver(for: pid)
+            self.pendingAXObservations.removeValue(forKey: pid)
+        }
+        axObserverTimeoutItems[pid] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.axObserverIdleTimeout, execute: item)
+    }
+
+    /// FIX-#4: 取消观察者空闲超时计时（observer 正常命中移除时调用）
+    private func cancelAXObserverTimeout(for pid: pid_t) {
+        axObserverTimeoutItems[pid]?.cancel()
+        axObserverTimeoutItems.removeValue(forKey: pid)
     }
 
     // MARK: - pinToScreen 窗口移动事件驱动
@@ -663,6 +702,8 @@ class WindowMover: ObservableObject {
             // 清理 AXObserver
             self.removeAXObserver(for: pid)
             self.pendingAXObservations.removeValue(forKey: pid)
+            // FIX-#4: App 已退出，取消空闲超时计时
+            self.cancelAXObserverTimeout(for: pid)
             // 清理 pinToScreen observer
             self.removePinObserver(for: pid)
             // 删除该 pid 前缀的所有 windowID 键
@@ -759,18 +800,32 @@ class WindowMover: ObservableObject {
         // 但在几百 ms 后 AX 窗口属性可用。这里在 0.25s/0.5s/1.5s 各尝试一次直接 AX 搬窗。
         // FIX-先显示后搬窗: 插入 0.25s 档——这类 App 的窗口在命中前一直在错误屏可见，
         // 第一档 0.5s 意味着可见期 ≥0.5s；提前到 0.25s 可把可见期压缩一半。命中后后续档自动跳过。
-        scheduleAXFallbackMove(pid: pid, targetFrame: resolved.visibleFrame, delays: [0.25, 0.5, 1.5])
+        scheduleAXFallbackMove(pid: pid, targetFrame: resolved.visibleFrame, delays: [0.25, 0.5, 1.5],
+                               launchDate: NSRunningApplication(processIdentifier: pid)?.launchDate)
     }
 
     /// FIX-启动不搬窗: 应用启动后的延迟 AX 兜底搬窗
     /// 不依赖 kAXWindowCreatedNotification 和 CGWindowList，而是定时直接用 AX 读取窗口并检查位置
     /// RT160: workItems 保存到 axFallbackWorkItems，stopMonitoring 时可取消
-    private func scheduleAXFallbackMove(pid: pid_t, targetFrame: CGRect, delays: [TimeInterval]) {
+    /// FIX-#6: 记录调度时刻的 launchDate，fire 时校验 PID 未被复用（与 onWindowDetected
+    ///         的 isPIDStillOriginal 防御对称），防止旧 App 退出后新 App 误中旧 targetFrame
+    /// FIX-#3: workItem 执行完成后从 axFallbackWorkItems 自清理，防止数组无界累积
+    private func scheduleAXFallbackMove(pid: pid_t, targetFrame: CGRect, delays: [TimeInterval], launchDate: Date? = nil) {
         for delay in delays {
+            // weakItem 弱引用自身用于执行后自清理——item 持闭包、闭包只弱持 item，无循环
+            var weakItem: DispatchWorkItem?
             let item = DispatchWorkItem { [weak self] in
+                defer {
+                    // FIX-#3: 无论命中/跳过/提前 return，执行完成即从数组移除
+                    if let it = weakItem { self?.axFallbackWorkItems.removeAll { $0 === it } }
+                }
                 guard let self = self else { return }
-                // 窗口已经不在运行或已搬到目标屏则跳过
-                guard NSRunningApplication(processIdentifier: pid) != nil else { return }
+                // FIX-#6: PID 复用防御——进程必须存在且 launchDate 与调度时刻一致
+                guard let currentApp = NSRunningApplication(processIdentifier: pid) else { return }
+                if let launchDate = launchDate, currentApp.launchDate != launchDate {
+                    logger.info("AX 兜底: PID 已被复用，跳过搬窗 pid=\(pid, privacy: .public)")
+                    return
+                }
                 let appElement = AXUIElementCreateApplication(pid)
                 var windowsValue: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
@@ -1364,7 +1419,15 @@ class WindowMover: ObservableObject {
                 return
             }
             // T5: 拓扑变化感知
-            guard self.isTargetScreenAvailable(targetFrame) else { timer.cancel(); return }
+            // FIX-#7: 拓扑分支与超时/稳定分支对称——同步清理 context + stabilityCount，
+            // 避免目标屏拔出后 context 永久残留在 activeDetections
+            guard self.isTargetScreenAvailable(targetFrame) else {
+                timer.cancel()
+                self.activeDetections[pid]?.stabilityTimer = nil
+                self.activeDetections.removeValue(forKey: pid)
+                self.stabilityCount.removeValue(forKey: pid)
+                return
+            }
 
             let currentBounds = self.findOnScreenWindow(for: pid)
             let isStable = currentBounds.map { self.isBoundsInTargetFrame($0, targetFrame: targetFrame) } ?? false
@@ -1626,6 +1689,9 @@ class WindowMover: ObservableObject {
         // RT160: 取消 AX 兜底延迟任务
         for item in axFallbackWorkItems { item.cancel() }
         axFallbackWorkItems.removeAll()
+        // FIX-#4: 取消 AXObserver 空闲超时任务
+        for item in axObserverTimeoutItems.values { item.cancel() }
+        axObserverTimeoutItems.removeAll()
         lastAppsFingerprint = 0
         cachedPinnedApps = []
         // AXObserver 清理
@@ -2175,15 +2241,17 @@ class WindowMover: ObservableObject {
         AXValueGetValue(posVal as! AXValue, .cgPoint, &position)
 
         // FIX-响应慢: size 也缓存，避免每次 kAXSizeAttribute 查询
+        // FIX-#5: 缓存超过 TTL 强制重读刷新，保证窗口 resize 后尺寸新鲜
         var size = CGSize.zero
-        if let cachedSize = pinWindowSizeCache[pid] {
-            size = cachedSize
+        if let cached = pinWindowSizeCache[pid],
+           Date().timeIntervalSince(cached.cachedAt) < Self.pinWindowSizeCacheTTL {
+            size = cached.size
         } else {
             var sizeValue: CFTypeRef?
             if AXUIElementCopyAttributeValue(targetWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
                let sizeVal = sizeValue {
                 AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-                pinWindowSizeCache[pid] = size
+                pinWindowSizeCache[pid] = (size, Date())
             }
         }
 
@@ -2224,22 +2292,6 @@ class WindowMover: ObservableObject {
         var size = CGSize.zero
         guard AXValueGetValue(sizeVal as! AXValue, .cgSize, &size) else { return nil }
         return size
-    }
-    
-    /// 获取包含指定点的屏幕
-    private func getScreenContainingPoint(_ point: CGPoint) -> CGRect? {
-        for screen in NSScreen.screens {
-            // 使用 visibleFrame 来匹配 getScreenID 函数中的匹配逻辑
-            let screenFrame = screen.visibleFrame
-            let relativeX = point.x - screenFrame.origin.x
-            let relativeY = point.y - screenFrame.origin.y
-            
-            if relativeX >= 0 && relativeX < screenFrame.width
-               && relativeY >= 0 && relativeY < screenFrame.height {
-                return screenFrame
-            }
-        }
-        return nil
     }
     
     /// 获取屏幕ID

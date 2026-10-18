@@ -478,8 +478,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let context = container.mainContext
             let descriptor = FetchDescriptor<AppInfo>(predicate: #Predicate { $0.bundleIdentifier == bundleID })
 
+            // FIX-#11: fetch 失败（Store 异常）必须与「记录不存在」区分——
+            //          原 try? 吞错后误走 insert 分支，同 bundleID 会产生重复记录
+            let existing: AppInfo?
+            do {
+                existing = try context.fetch(descriptor).first
+            } catch {
+                os_log("setCurrentAppScreen fetch 失败: %{public}@（bundleID=%{public}@，跳过本次保存）",
+                       log: OSLog.default, type: .error, error.localizedDescription, bundleID)
+                return
+            }
+
             var titlePattern: String? = nil
-            if let existing = try? context.fetch(descriptor).first {
+            if let existing = existing {
                 existing.updateScreen(screenID: screenID, screenName: screen.localizedName, screenSerialNumber: screenSerialNumber)
                 // R-167: 用户主动 set 屏 = 重新启用屏幕规则——clear 之后 set 恢复 isEnabled
                 //        与 updatePinToScreen 的 `if pinned && !isEnabled { isEnabled = true }` 对齐

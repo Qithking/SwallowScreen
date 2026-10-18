@@ -714,8 +714,8 @@ struct HotkeyCard: View {
         )
     }
     
-    private func keyCodeToString(_ keyCode: UInt32) -> String {
-        let keyMap: [UInt32: String] = [
+    // FIX-#15: 键码表提为 static let——原函数体内每次渲染都重建 70+ 条目的字典（L688 每帧调用）
+    private static let keyCodeNames: [UInt32: String] = [
             0x00: "A", 0x01: "S", 0x02: "D", 0x03: "F", 0x04: "H", 0x05: "G", 0x06: "Z", 0x07: "X",
             0x08: "C", 0x09: "V", 0x0B: "B", 0x0C: "Q", 0x0D: "W", 0x0E: "E", 0x0F: "R",
             0x10: "Y", 0x11: "T", 0x12: "1", 0x13: "2", 0x14: "3", 0x15: "4", 0x16: "6",
@@ -744,9 +744,10 @@ struct HotkeyCard: View {
             0x72: "Help", 0x47: "NumClear",
             0x73: "Home", 0x74: "PgDn", 0x75: "End", 0x79: "PgUp",
             0x39: "CapsLock"
-        ]
+    ]
 
-        return keyMap[keyCode] ?? "Key(\(keyCode))"
+    private func keyCodeToString(_ keyCode: UInt32) -> String {
+        Self.keyCodeNames[keyCode] ?? "Key(\(keyCode))"
     }
 }
 

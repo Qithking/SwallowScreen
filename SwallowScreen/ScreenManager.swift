@@ -91,7 +91,7 @@ class ScreenManager: ObservableObject {
         return nil
     }
 
-    /// RT7: 与 WindowMover.getScreenContainingPoint 统一用 visibleFrame
+    /// RT7: 使用 visibleFrame 匹配（原对齐 WindowMover.getScreenContainingPoint，后者已随 dead code 清理删除）
     func screen(containing point: CGPoint) -> ScreenInfo? {
         for screen in NSScreen.screens {
             if screen.visibleFrame.contains(point) {

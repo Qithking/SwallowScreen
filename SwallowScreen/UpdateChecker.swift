@@ -54,7 +54,7 @@ final class UpdateChecker {
         self.session = session
     }
 
-    /// RT11: 主动取消正在进行的 check（不会调用其 completion）
+    /// RT11: 主动取消正在进行的 check（completion 会以 NSURLErrorCancelled 被回调，check 内部已静默过滤）
     func cancel() {
         task?.cancel()
         task = nil
@@ -77,6 +77,11 @@ final class UpdateChecker {
                 DispatchQueue.main.async { completion(result) }
             }
             if let error = error {
+                // FIX-#14: 主动 cancel / 被新 check 抢占时 task 会以 NSURLErrorCancelled 回调，
+                //          此时不向调用方报「检查失败」（调用方 UI 会误显示错误态）
+                if (error as? URLError)?.code == .cancelled || (error as NSError).code == NSURLErrorCancelled {
+                    return
+                }
                 deliver(.failure(.network(error)))
                 return
             }
