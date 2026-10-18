@@ -84,6 +84,11 @@ class WindowMover: ObservableObject {
     // 与启动检测的 axObservers 独立，pinToScreen observer 长期存活
     private var pinObservers: [pid_t: AXObserver] = [:]
     private var pinRunLoopSources: [pid_t: CFRunLoopSource] = [:]
+    // FIX-问题12回归: 记录每个 pid 的 created 快照截止时间——订阅 kAXWindowCreatedNotification 时，
+    // 部分应用会立即为所有已存在窗口补发 created 通知（AX 快照行为），快照搬动会与启动期
+    // startStabilityCheck/verifyAndRecenterWindow 竞态，导致窗口停在错误屏幕且无人纠正。
+    // 快照通知在订阅后毫秒级到达，截止窗口 1s 内忽略全部 created 通知。
+    private var createdSnapshotCutoff: [pid_t: Date] = [:]
 
     // FIX-响应慢: pinObserver 快速路径缓存——pid → (targetFrame, screenID)
     // 窗口移动事件到达时直接查缓存，跳过 SwiftData fetch + runningApplications 遍历
@@ -334,8 +339,10 @@ class WindowMover: ObservableObject {
     // MARK: - pinToScreen 窗口移动事件驱动
     // FIX-响应慢: C 回调直接 DispatchQueue.main.async 调用，不再需要 NotificationCenter 桥接
 
-    /// 为 pinned app 创建 AXObserver，订阅 kAXMovedNotification
+    /// 为 pinned app 创建 AXObserver，订阅 kAXMovedNotification + kAXWindowCreatedNotification
     /// 窗口被拖动时立即触发检查，响应速度从 100ms 轮询 → 事件驱动（<10ms）
+    /// FIX-问题12: 追加订阅窗口创建通知——已运行应用新开的窗口（如 Cmd+N、微信新聊天窗）
+    ///             不在 100ms 轮询覆盖内（轮询每 pid 只查一个最大主窗口），创建事件驱动立即搬动
     private func setupPinObserver(for pid: pid_t) {
         // 已存在则跳过
         guard pinObservers[pid] == nil else { return }
@@ -359,6 +366,20 @@ class WindowMover: ObservableObject {
             return
         }
 
+        // FIX-问题12: 订阅窗口创建通知；失败不影响 moved 监听（部分应用可能不支持）
+        let createdResult = AXObserverAddNotification(
+            observer, appElement,
+            kAXWindowCreatedNotification as CFString,
+            nil
+        )
+        if createdResult == .success {
+            // FIX-问题12回归: 订阅成功即进入快照截止窗口——应用会为所有已存在窗口
+            // 补发 created 通知（AX 快照），窗口期内忽略，避免与启动搬动链路竞态
+            createdSnapshotCutoff[pid] = Date().addingTimeInterval(1.0)
+        } else {
+            logger.debug("pinObserver kAXWindowCreatedNotification 订阅失败: pid=\(pid) result=\(createdResult.rawValue)")
+        }
+
         let runLoopSource = AXObserverGetRunLoopSource(observer)
         // RT159: 显式使用 CFRunLoopGetMain()，与 removePinObserver/deinit 中移除保持一致
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .defaultMode)
@@ -368,18 +389,21 @@ class WindowMover: ObservableObject {
         logger.debug("pinObserver 已创建: pid=\(pid)")
     }
 
-    /// pinToScreen AXObserver C 回调——窗口移动通知
+    /// pinToScreen AXObserver C 回调——窗口移动/创建通知
     /// FIX-响应慢: 直接 DispatchQueue.main.async 调用，不走 NotificationCenter 桥接（省 ~10-20ms）
+    /// FIX-问题12: 按通知类型分发——moved 走拖拽检测回弹，created 携带窗口 element 立即搬新窗口
     private static let pinObserverCallback: AXObserverCallback = { observer, element, notification, _ in
         var pid: pid_t = 0
         let pidResult = AXUIElementGetPid(element, &pid)
         guard pidResult == .success else { return }
 
         let notificationStr = notification as String
-        guard notificationStr == kAXMovedNotification as String else { return }
-
         DispatchQueue.main.async {
-            WindowMover.shared?.handlePinWindowMoved(pid: pid)
+            if notificationStr == kAXMovedNotification as String {
+                WindowMover.shared?.handlePinWindowMoved(pid: pid)
+            } else if notificationStr == kAXWindowCreatedNotification as String {
+                WindowMover.shared?.handlePinWindowCreated(pid: pid, element: element)
+            }
         }
     }
 
@@ -407,6 +431,54 @@ class WindowMover: ObservableObject {
             // 鼠标已松开——不是用户拖拽（可能是系统移动窗口），立即检查回弹
             performPinCheck(pid: pid)
         }
+    }
+
+    /// FIX-问题12: pinned app 新窗口创建——新窗口立即搬到固定屏幕
+    /// 背景：pinObserver 原只订阅 kAXMovedNotification（拖动事件），窗口创建不触发；
+    ///      100ms 轮询每 pid 只检查一个最大主窗口，新开的窗口（面积小于主窗口）不被覆盖，
+    ///      导致新窗口停留在当前屏，用户手动拖动一次后（触发 moved 事件）才被搬回。
+    private func handlePinWindowCreated(pid: pid_t, element: AXUIElement) {
+        // 启动期跳过——启动窗口由 handleAppLaunch / earlyWindowCatcher 负责，避免竞态
+        guard !isPerformingInitialMove else { return }
+
+        // FIX-问题12回归: 快照截止窗口内忽略——订阅 created 后应用会为所有已存在窗口
+        // 补发快照通知，此时搬动会与启动稳定性校验竞态，窗口停在错误屏幕
+        if let cutoff = createdSnapshotCutoff[pid] {
+            if Date() < cutoff { return }
+            // 截止时间已过，惰性清理，后续 created 通知正常处理（真·新窗口）
+            createdSnapshotCutoff.removeValue(forKey: pid)
+        }
+
+        // 仅处理 pinned app（缓存未命中说明已取消固定或非 pinned）
+        guard let cached = pinTargetCache[pid] else { return }
+
+        // 读取新窗口位置 + 尺寸（可读 = 窗口存活且就绪）
+        var positionValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
+              let posVal = positionValue else { return }
+        var position = CGPoint.zero
+        AXValueGetValue(posVal as! AXValue, .cgPoint, &position)
+
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let sizeVal = sizeValue else { return }
+        var size = CGSize.zero
+        AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+
+        // 过滤瞬时/辅助窗口（与 CGWindowList 路径的 ≥50 尺寸过滤一致）
+        guard size.width >= 50, size.height >= 50 else { return }
+
+        // 已在目标屏则无需搬动
+        let bounds = CGRect(origin: position, size: size)
+        guard !isBoundsInTargetFrame(bounds, targetFrame: cached.visibleFrame) else { return }
+
+        // 防循环：该窗口标识正在搬动/冷却中时跳过（独立于主窗口的 "\(pid)-main" key）
+        let windowID = "\(pid)-created"
+        guard !movingWindows.contains(windowID), !lastMovedWindows.contains(windowID) else { return }
+
+        // 搬动到固定屏幕（moveWindowToTargetScreen 内部 = hideMoveUnhide + 冷却 + 延迟验证）
+        movingWindows.insert(windowID)
+        moveWindowToTargetScreen(element, screenFrame: cached.frame, visibleFrame: cached.visibleFrame, windowID: windowID, prebuiltSize: size)
     }
 
     /// 启动全局鼠标松开事件监听（仅在有待检查的拖拽窗口时启动）
@@ -499,12 +571,16 @@ class WindowMover: ObservableObject {
         if let observer = pinObservers[pid] {
             let appElement = AXUIElementCreateApplication(pid)
             AXObserverRemoveNotification(observer, appElement, kAXMovedNotification as CFString)
+            // FIX-问题12: created 通知与 moved 注册在同一 observer，移除时同步清理
+            AXObserverRemoveNotification(observer, appElement, kAXWindowCreatedNotification as CFString)
             pinObservers.removeValue(forKey: pid)
         }
         // FIX-响应慢: 同步清理 pinTargetCache + pinWindowCache + pinWindowSizeCache + 拖拽检测
         pinTargetCache.removeValue(forKey: pid)
         pinWindowCache.removeValue(forKey: pid)
         pinWindowSizeCache.removeValue(forKey: pid)
+        // FIX-问题12回归: 同步清理 created 快照截止时间，避免残留过期窗口误吞真·新窗口通知
+        createdSnapshotCutoff.removeValue(forKey: pid)
         pendingDragCheckPids.remove(pid)
         // FIX: 如果没有待检查的拖拽窗口了，清理全局鼠标松开监听
         if pendingDragCheckPids.isEmpty, let monitor = globalMouseUpMonitor {
@@ -680,8 +756,10 @@ class WindowMover: ObservableObject {
         earlyWindowCatcher(pid: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
 
         // FIX-启动不搬窗: 延迟 AX 兜底——部分 App（如微信）启动时 AXObserver/CGWindowList 都检测不到窗口，
-        // 但在几百 ms 后 AX 窗口属性可用。这里在 0.5s 和 1.5s 再各尝试一次直接 AX 搬窗。
-        scheduleAXFallbackMove(pid: pid, targetFrame: resolved.visibleFrame, delays: [0.5, 1.5])
+        // 但在几百 ms 后 AX 窗口属性可用。这里在 0.25s/0.5s/1.5s 各尝试一次直接 AX 搬窗。
+        // FIX-先显示后搬窗: 插入 0.25s 档——这类 App 的窗口在命中前一直在错误屏可见，
+        // 第一档 0.5s 意味着可见期 ≥0.5s；提前到 0.25s 可把可见期压缩一半。命中后后续档自动跳过。
+        scheduleAXFallbackMove(pid: pid, targetFrame: resolved.visibleFrame, delays: [0.25, 0.5, 1.5])
     }
 
     /// FIX-启动不搬窗: 应用启动后的延迟 AX 兜底搬窗
