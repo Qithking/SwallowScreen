@@ -87,8 +87,8 @@
 
 | 快捷键         | 功能           |
 | ----------- | ------------ |
-| `⌘ + ⇧ + =` | 将前台应用固定到当前屏幕 |
-| `⌘ + ⇧ + 9` | 取消前台应用的屏幕固定  |
+| `⌘ + ⇧ + 1` | 将前台应用固定到当前屏幕 |
+| `⌘ + ⇧ + 2` | 取消前台应用的屏幕固定  |
 
 > 💡 快捷键可在「设置」中自定义，支持 `⌘ / ⌥ / ⇧ / ⌃` 的任意组合。
 
@@ -149,6 +149,7 @@ SwallowScreen/
 ├── SettingsView.swift           # 设置窗口视图
 ├── DownloadWindow.swift         # 版本更新下载进度窗口
 ├── UpdateChecker.swift          # 自动更新检测服务
+├── RelaunchManager.swift        # 自更新安装与重启
 ├── AppManager.swift             # 系统应用列表与运行状态
 ├── ScreenManager.swift          # 显示器接入与变更监听
 ├── WindowMover.swift            # 窗口移动与回弹核心逻辑
