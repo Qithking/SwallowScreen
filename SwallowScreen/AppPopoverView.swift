@@ -9,6 +9,10 @@ import SwiftUI
 import SwiftData
 import AppKit
 import os.log
+// SPM 构建下 UpdateChannel 位于 SwallowScreenCore 模块；Xcode 工程为平面 target 无需 import
+#if canImport(SwallowScreenCore)
+import SwallowScreenCore
+#endif
 
 struct AppPopoverView: View {
     @Environment(\.modelContext) private var modelContext
@@ -532,8 +536,11 @@ struct AppPopoverView: View {
     
     private func openDownloadWindow() {
         guard let url = URL(string: downloadURL) else { return }
+        // 按设置的更新方式解析下载渠道：官网直连 / gh-proxy 加速（脏数据兜底官网）
+        let channel = UpdateChannel(rawValue: appSettings.first?.updateChannel ?? "") ?? .github
+        let resolved = URL(string: channel.resolveDownloadURL(url.absoluteString)) ?? url
         // RT70: 抽到 DownloadWindowController.open 静态方法
-        DownloadWindowController.open(version: latestVersion, downloadURL: url)
+        DownloadWindowController.open(version: latestVersion, downloadURL: resolved)
     }
 }
 

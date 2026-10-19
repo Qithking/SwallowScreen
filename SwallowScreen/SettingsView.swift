@@ -11,6 +11,10 @@ import ServiceManagement
 import Carbon.HIToolbox
 import AppKit
 import os.log
+// SPM 构建下 UpdateChannel 位于 SwallowScreenCore 模块；Xcode 工程为平面 target 无需 import
+#if canImport(SwallowScreenCore)
+import SwallowScreenCore
+#endif
 
 private let settingsLog = OSLog(subsystem: "com.swallowscreen.SwallowScreen", category: "Settings")
 
@@ -98,6 +102,30 @@ struct GeneralSettingsView: View {
                             .foregroundColor(.orange)
                             .padding(.horizontal, 16)
                             .padding(.bottom, 8)
+                    }
+
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    // 更新方式：决定更新包从官网直连还是经加速镜像下载
+                    SettingsRow(
+                        icon: "network.circle.fill",
+                        iconColor: .purple,
+                        title: "更新方式",
+                        subtitle: "下载更新包使用的渠道"
+                    ) {
+                        if let s = settings {
+                            @Bindable var bindable = s
+                            // 绑定 String rawValue；脏数据由读取侧 UpdateChannel(rawValue:) ?? .github 兜底
+                            Picker("", selection: $bindable.updateChannel) {
+                                Text("GitHub 官网").tag(UpdateChannel.github.rawValue)
+                                Text("GitHub 加速").tag(UpdateChannel.ghproxy.rawValue)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .fixedSize()
+                            .onChange(of: s.updateChannel) { _, _ in markUpdated() }
+                        }
                     }
                 }
 
