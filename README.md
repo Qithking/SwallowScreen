@@ -125,6 +125,9 @@ swift build -c release
 
 # 运行
 ./.build/release/SwallowScreen
+
+# 单元测试（屏幕几何 / 更新渠道）
+swift test
 ```
 
 ### 方式三：命令行通用二进制
@@ -149,15 +152,23 @@ SwallowScreen/
 ├── SettingsView.swift           # 设置窗口视图
 ├── DownloadWindow.swift         # 版本更新下载进度窗口
 ├── UpdateChecker.swift          # 自动更新检测服务
+├── UpdateChannel.swift          # 更新渠道（GitHub 官网 / 加速镜像）
 ├── RelaunchManager.swift        # 自更新安装与重启
 ├── AppManager.swift             # 系统应用列表与运行状态
-├── ScreenManager.swift          # 显示器接入与变更监听
+├── ScreenManager.swift          # 显示器接入、变更监听与目标屏解析
 ├── WindowMover.swift            # 窗口移动与回弹核心逻辑
+├── AXWindowReader.swift         # Accessibility API 类型化读取封装
+├── CooldownRegistry.swift       # 冷却/守卫任务统一注册表
+├── ScreenGeometry.swift         # 屏幕几何纯函数（SwallowScreenCore）
 ├── VisualEffectView.swift       # 毛玻璃背景组件
 ├── AppInfo.swift                # 应用配置数据模型
 ├── AppSettings.swift            # 全局设置数据模型
 ├── Info.plist                   # 应用清单
 └── Assets.xcassets/             # 图标与颜色资源
+
+Tests/SwallowScreenTests/       # 单元测试（swift test）
+├── ScreenGeometryTests.swift    # 屏幕几何纯函数测试
+└── UpdateChannelTests.swift     # 更新渠道测试
 ```
 
 ## 🛠️ 技术栈
