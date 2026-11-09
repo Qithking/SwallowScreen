@@ -756,50 +756,53 @@ class WindowMover: ObservableObject {
         earlyWindowCatcher(pid: pid, targetFrame: resolved.visibleFrame, titlePattern: appInfo.windowTitlePattern)
 
         // 延迟 AX 兜底：部分 App（如微信）启动时 AXObserver/CGWindowList 都检测不到窗口，
-        // 但在几百 ms 后 AX 窗口属性可用。这里在 0.25s/0.5s/1.5s 各尝试一次直接 AX 搬窗。
-        // 首档 0.25s 把错误屏可见期压缩到最短（0.5s 起档可见期 ≥0.5s），命中后后续档自动跳过。
-        scheduleAXFallbackMove(pid: pid, targetFrame: resolved.visibleFrame, delays: [0.25, 0.5, 1.5],
+        // 但在几百 ms 后 AX 窗口属性可用。滑动探测从调度起每 40ms 读 AX 窗口，
+        // 窗口一就绪立即搬窗——把错误屏可见期压缩到"AX 就绪 + ≤40ms"。
+        scheduleAXFallbackMove(pid: pid, targetFrame: resolved.visibleFrame,
                                launchDate: NSRunningApplication(processIdentifier: pid)?.launchDate)
     }
 
-    /// 应用启动后的延迟 AX 兜底搬窗
-    /// 不依赖 kAXWindowCreatedNotification 和 CGWindowList，而是定时直接用 AX 读取窗口并检查位置
-    /// 延迟任务登记到 cooldowns（key "axFallback:..."），stopMonitoring 统一取消
-    /// 记录调度时刻的 launchDate，fire 时校验 PID 未被复用（与 onWindowDetected
-    /// 的 isPIDStillOriginal 防御对称），防止旧 App 退出后新 App 误中旧 targetFrame
-    /// workItem 执行完成后由 CooldownRegistry 自动移除条目，防止无界累积
-    private func scheduleAXFallbackMove(pid: pid_t, targetFrame: CGRect, delays: [TimeInterval], launchDate: Date? = nil) {
-        for delay in delays {
-            let key = "axFallback:\(pid):\(UUID().uuidString)"
-            cooldowns.coolDown(key, duration: delay) { [weak self] in
+    /// 应用启动后的延迟 AX 兜底搬窗——滑动探测链（原固定档位升级为响应式）
+    /// 不依赖 kAXWindowCreatedNotification 和 CGWindowList，从调度即每 40ms 读 AX 窗口，
+    /// 窗口一出现（AX 树就绪）立即搬动——微信类 App 不再等下个档位，可见期缩短至
+    /// "AX 就绪 + ≤40ms"。停止条件：命中搬动 / 1.5s 超时 / stopMonitoring（isMonitoring=false）。
+    /// 记录调度时刻的 launchDate，探测时校验 PID 未被复用（与 onWindowDetected 的
+    /// isPIDStillOriginal 防御对称），防止旧 App 退出后新 App 误中旧 targetFrame。
+    private func scheduleAXFallbackMove(pid: pid_t, targetFrame: CGRect, launchDate: Date? = nil) {
+        let startedAt = Date()
+        let timeout: TimeInterval = 1.5
+        // 首次立即探测（普通 App 窗口已出现则 t≈0 命中）；未出现则 40ms 间隔递归
+        probeAXFallbackTick(pid: pid, targetFrame: targetFrame, launchDate: launchDate, startedAt: startedAt, timeout: timeout)
+    }
+
+    /// 滑动探测单次 tick——窗口就绪即搬动；未就绪则 40ms 后继续，命中/超时/停止 三条件自停止
+    private func probeAXFallbackTick(pid: pid_t, targetFrame: CGRect, launchDate: Date?, startedAt: Date, timeout: TimeInterval) {
+        guard isMonitoring else { return }
+        guard Date().timeIntervalSince(startedAt) < timeout else { return }
+        // PID 复用防御——进程必须存在且 launchDate 与调度时刻一致
+        guard let currentApp = NSRunningApplication(processIdentifier: pid) else { return }
+        if let launchDate = launchDate, currentApp.launchDate != launchDate {
+            logger.info("AX 兜底: PID 已被复用，跳过搬窗 pid=\(pid, privacy: .public)")
+            return
+        }
+        guard let axWindows = AXWindowReader.windows(pid: pid), !axWindows.isEmpty,
+              let mainWindow = pickMainWindow(from: axWindows),
+              let currentBounds = AXWindowReader.bounds(mainWindow) else {
+            // 窗口未就绪（微信类 AX 树未建）——40ms 后继续探测
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
                 guard let self = self else { return }
-                // PID 复用防御——进程必须存在且 launchDate 与调度时刻一致
-                guard let currentApp = NSRunningApplication(processIdentifier: pid) else { return }
-                if let launchDate = launchDate, currentApp.launchDate != launchDate {
-                    logger.info("AX 兜底: PID 已被复用，跳过搬窗 pid=\(pid, privacy: .public)")
-                    return
-                }
-                guard let axWindows = AXWindowReader.windows(pid: pid), !axWindows.isEmpty else {
-                    logger.info("AX 兜底: 未获取到窗口 pid=\(pid, privacy: .public)")
-                    return
-                }
-                guard let mainWindow = self.pickMainWindow(from: axWindows) else {
-                    logger.info("AX 兜底: 挑不出主窗口 pid=\(pid, privacy: .public)")
-                    return
-                }
-                guard let currentBounds = AXWindowReader.bounds(mainWindow) else {
-                    return
-                }
-                if self.isBoundsInTargetFrame(currentBounds, targetFrame: targetFrame) {
-                    logger.info("AX 兜底: 窗口已在目标屏幕 pid=\(pid, privacy: .public)")
-                    return
-                }
-                logger.info("AX 兜底: 窗口不在目标屏幕，执行搬窗 pid=\(pid, privacy: .public) current=\(NSStringFromRect(currentBounds), privacy: .public) target=\(NSStringFromRect(targetFrame), privacy: .public)")
-                self.hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-                    self?.startStabilityCheck(pid: pid, targetFrame: targetFrame)
-                }
+                self.probeAXFallbackTick(pid: pid, targetFrame: targetFrame, launchDate: launchDate, startedAt: startedAt, timeout: timeout)
             }
+            return
+        }
+        if isBoundsInTargetFrame(currentBounds, targetFrame: targetFrame) {
+            logger.info("AX 兜底: 窗口已在目标屏幕 pid=\(pid, privacy: .public)")
+            return
+        }
+        logger.info("AX 兜底: 窗口不在目标屏幕，执行搬窗 pid=\(pid, privacy: .public) current=\(NSStringFromRect(currentBounds), privacy: .public) target=\(NSStringFromRect(targetFrame), privacy: .public)")
+        hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.startStabilityCheck(pid: pid, targetFrame: targetFrame)
         }
     }
     
@@ -1034,20 +1037,22 @@ class WindowMover: ObservableObject {
         let context = DetectionContext(pid: pid, targetFrame: targetFrame, launchDate: launchDate, titlePattern: titlePattern)
         activeDetections[pid] = context
 
-        // 链 A：CGWindowList 高频轮询
-        startCGDetectionTimer(context: context, timeout: detectionTimeout)
+        // 链 A：CGWindowList 高频轮询（启动期 16ms 抢首帧，运行期保持 33ms 控 CPU）
+        // 16ms ≈ 60Hz 一帧——窗口对象一出现即检测，可见期压缩到帧级
+        startCGDetectionTimer(context: context, timeout: detectionTimeout, interval: 0.016)
         // 链 B：AX 100ms 兜底（无 Screen Recording 权限时仍能工作）
         startAXDetectionTimer(context: context, timeout: detectionTimeout)
     }
 
     /// 链 A：CGWindowList 高频轮询（DispatchSourceTimer 实现，无栈增长）
-    private func startCGDetectionTimer(context: DetectionContext, timeout: TimeInterval) {
+    /// interval 为 nil 时用全局 cgDetectionInterval（33ms 运行期默认）
+    private func startCGDetectionTimer(context: DetectionContext, timeout: TimeInterval, interval: TimeInterval? = nil) {
         let pid = context.pid
         let targetFrame = context.targetFrame
         let stopFlag = context.stopFlag
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        let interval = cgDetectionInterval
-        timer.schedule(deadline: .now(), repeating: .milliseconds(Int(interval * 1000)), leeway: .milliseconds(2))
+        let tickInterval = interval ?? cgDetectionInterval
+        timer.schedule(deadline: .now(), repeating: .milliseconds(Int(tickInterval * 1000)), leeway: .milliseconds(2))
         let startTime = Date()
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
