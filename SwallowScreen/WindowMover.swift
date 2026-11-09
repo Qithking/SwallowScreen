@@ -101,6 +101,9 @@ class WindowMover: ObservableObject {
     // FIX-#5: 附带缓存时间戳——窗口 resize 后陈旧尺寸会导致 isBoundsInTargetFrame
     //         中心点误判与搬动 prebuiltSize 错误，超过 TTL 强制重读刷新
     private var pinWindowSizeCache: [pid_t: (size: CGSize, cachedAt: Date)] = [:]
+    /// FIX-问题23: 记录每 pid 最近一次触发退出全屏的时间——退出全屏动画约 0.5-1s，
+    /// 期间 100ms 轮询会反复命中全屏分支，3s 冷却内不重复触发
+    private var fullscreenExitAttempts: [pid_t: Date] = [:]
     /// FIX-#5: pinWindowSizeCache 过期时长
     private static let pinWindowSizeCacheTTL: TimeInterval = 5.0
 
@@ -620,6 +623,8 @@ class WindowMover: ObservableObject {
         pinWindowSizeCache.removeValue(forKey: pid)
         // FIX-问题12回归: 同步清理 created 快照截止时间，避免残留过期窗口误吞真·新窗口通知
         createdSnapshotCutoff.removeValue(forKey: pid)
+        // FIX-问题23: 同步清理退出全屏冷却记录，避免同 pid 新实例继承过期时间戳
+        fullscreenExitAttempts.removeValue(forKey: pid)
         pendingDragCheckPids.remove(pid)
         // FIX: 如果没有待检查的拖拽窗口了，清理全局鼠标松开监听
         if pendingDragCheckPids.isEmpty, let monitor = globalMouseUpMonitor {
@@ -1029,16 +1034,18 @@ class WindowMover: ObservableObject {
         return bestTitledBounds ?? bestUnconditionalBounds
     }
 
-    /// FIX-响应慢: 一次性获取所有 on-screen 主窗口并按 pid 分组，避免每个 App 单独调用 CGWindowListCopyWindowInfo
-    /// 逻辑与 findOnScreenWindow 一致：优先有 title 的最大面积窗口，兜底无 title 但尺寸 ≥ 50 的最大面积窗口
-    private func fetchAllOnScreenMainWindows() -> [pid_t: CGRect] {
+    /// FIX-响应慢: 一次性获取所有 on-screen 窗口并按 pid 分组，避免每个 App 单独调用 CGWindowListCopyWindowInfo
+    /// FIX-问题23根因B: 返回每 pid 的**所有**候选窗口（有 title 的全部 + 无 title 但 ≥50 的全部），按面积降序。
+    /// 此前只返回每 pid 面积最大的一个窗口，多窗口应用（如 Windows App 会话窗+连接列表窗）中
+    /// 小面积窗口不被轮询覆盖，导致「有一定概率不搬」。过滤规则与 handlePinWindowCreated 的 ≥50 一致。
+    private func fetchAllOnScreenWindowBounds() -> [pid_t: [CGRect]] {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return [:]
         }
 
-        var bestTitled: [pid_t: (bounds: CGRect, area: CGFloat)] = [:]
-        var bestUntitled: [pid_t: (bounds: CGRect, area: CGFloat)] = [:]
+        // pid → 候选窗口列表，收集后按面积降序（首个即旧逻辑中的"主窗口"）
+        var candidates: [pid_t: [(bounds: CGRect, area: CGFloat)]] = [:]
 
         for window in windowList {
             guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t else { continue }
@@ -1056,21 +1063,15 @@ class WindowMover: ObservableObject {
             let title = window[kCGWindowName as String] as? String
             let hasTitle = !(title?.isEmpty ?? true)
 
-            if hasTitle {
-                if area > (bestTitled[ownerPID]?.area ?? 0) {
-                    bestTitled[ownerPID] = (bounds, area)
-                }
-            } else if width >= 50 && height >= 50 {
-                if area > (bestUntitled[ownerPID]?.area ?? 0) {
-                    bestUntitled[ownerPID] = (bounds, area)
-                }
+            // 有 title 的窗口全部收集；无 title 的需满足最小尺寸（过滤瞬时/辅助窗口）
+            if hasTitle || (width >= 50 && height >= 50) {
+                candidates[ownerPID, default: []].append((bounds, area))
             }
         }
 
-        var result: [pid_t: CGRect] = [:]
-        let allPIDs = Set(bestTitled.keys).union(bestUntitled.keys)
-        for pid in allPIDs {
-            result[pid] = bestTitled[pid]?.bounds ?? bestUntitled[pid]?.bounds
+        var result: [pid_t: [CGRect]] = [:]
+        for (pid, list) in candidates {
+            result[pid] = list.sorted { $0.area > $1.area }.map { $0.bounds }
         }
         return result
     }
@@ -1603,8 +1604,8 @@ class WindowMover: ObservableObject {
         )
         guard let allApps = try? modelContext.fetch(descriptor) else { return }
 
-        // FIX-启动不搬窗: 一次性获取所有 on-screen 主窗口，避免逐应用调用 CGWindowListCopyWindowInfo
-        let allMainWindows = fetchAllOnScreenMainWindows()
+        // FIX-启动不搬窗: 一次性获取所有 on-screen 窗口，避免逐应用调用 CGWindowListCopyWindowInfo
+        let allOnScreenWindows = fetchAllOnScreenWindowBounds()
 
         // FIX-启动不搬窗: 预构建 bundleID → pid 字典，避免循环内重复查找
         let runningApps = NSWorkspace.shared.runningApplications
@@ -1638,7 +1639,8 @@ class WindowMover: ObservableObject {
             // FIX-启动不搬窗: 从预构建字典查找 pid
             guard let pid = bundleIDToPid[appInfo.bundleIdentifier] else { continue }
 
-            if let bounds = allMainWindows[pid] {
+            // FIX-问题23根因B: 启动搬窗仍以面积最大的窗口（首个候选）为准，其余窗口由 100ms 轮询路径覆盖
+            if let bounds = allOnScreenWindows[pid]?.first {
                 // 有可见窗口——直接判断位置
                 if isBoundsInTargetFrame(bounds, targetFrame: resolved.visibleFrame) {
                     // 窗口已在目标屏幕——跳过
@@ -1813,8 +1815,8 @@ class WindowMover: ObservableObject {
             return
         }
 
-        // FIX-响应慢: 一次性获取所有 on-screen 主窗口，避免每个 App 单独调用 CGWindowListCopyWindowInfo
-        let allMainWindows = fetchAllOnScreenMainWindows()
+        // FIX-响应慢: 一次性获取所有 on-screen 窗口，避免每个 App 单独调用 CGWindowListCopyWindowInfo
+        let allOnScreenWindows = fetchAllOnScreenWindowBounds()
 
         for appInfo in pinnedApps {
             // RT69: 走 resolveTargetFrame helper
@@ -1830,12 +1832,16 @@ class WindowMover: ObservableObject {
             // pendingDragCheckPids 记录了正在被拖拽的窗口 pid，等松手后再检查
             if pendingDragCheckPids.contains(pid) { continue }
 
-            // FIX-响应慢: 冷却期内或正在移动中时直接跳过，避免无意义的 AX 调用
-            if lastMovedWindows.contains(windowID) || movingWindows.contains(windowID) { continue }
-
-            // 使用预获取的主窗口 bounds（可能为 nil，表示当前无窗口）
-            let mainBounds = allMainWindows[pid]
-            checkWindowPosition(pid: pid, screenFrame: resolved.frame, targetFrame: resolved.visibleFrame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id, prebuiltMainBounds: mainBounds)
+            // FIX-问题23根因B: 检查该 pid 的**所有**候选窗口（面积降序），不再只查面积最大的一个——
+            // 多窗口应用（如 Windows App 会话窗+连接列表窗）中小窗口此前不被轮询覆盖
+            let windowBoundsList = allOnScreenWindows[pid] ?? []
+            for (index, bounds) in windowBoundsList.enumerated() {
+                // 首窗口沿用 "\(pid)-main" 保持与既有冷却/位置记录兼容，其余窗口追加索引后缀
+                let wid = index == 0 ? windowID : "\(windowID)-\(index)"
+                // 各窗口独立冷却检查，避免无意义的 AX 调用
+                if lastMovedWindows.contains(wid) || movingWindows.contains(wid) { continue }
+                checkWindowPosition(pid: pid, screenFrame: resolved.frame, targetFrame: resolved.visibleFrame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id, prebuiltMainBounds: bounds, windowKey: wid)
+            }
         }
 
         // P1: 本轮扫到的存活 pids——previousWindowPositions 中其他 pid 前缀视为死键
@@ -2131,7 +2137,7 @@ class WindowMover: ObservableObject {
     /// FIX-响应慢: 支持传入 prebuiltMainBounds，避免在 checkAndEnforcePinnedWindows 循环内重复调用 CGWindowListCopyWindowInfo
     /// FIX-响应慢: 新增 fastPath 参数——pinObserver 快速路径中直接用 AX 读取位置 + 移动，
     ///     跳过 CGWindowList 扫描，减少 ~50-100ms 延迟
-    private func checkWindowPosition(pid: pid_t, screenFrame: CGRect, targetFrame: CGRect, appBundleID: String, screenID: UInt32, prebuiltMainBounds: CGRect? = nil, fastPath: Bool = false) {
+    private func checkWindowPosition(pid: pid_t, screenFrame: CGRect, targetFrame: CGRect, appBundleID: String, screenID: UInt32, prebuiltMainBounds: CGRect? = nil, fastPath: Bool = false, windowKey: String? = nil) {
         if fastPath {
             // FIX-响应慢: 快速路径——直接用 AX 读取主窗口位置并判断，跳过 CGWindowList
             checkWindowPositionFastPath(pid: pid, screenFrame: screenFrame, targetFrame: targetFrame, screenID: screenID)
@@ -2141,10 +2147,12 @@ class WindowMover: ObservableObject {
         // FIX-响应慢: 优先使用预计算的 bounds；兜底才走单点 CGWindowList 查询（供早期检测路径复用）
         guard let bounds = prebuiltMainBounds ?? findOnScreenWindow(for: pid) else { return }
 
+        // FIX-问题23根因B: windowID 支持外部指定——轮询路径逐窗口检查时每窗口一个独立标识
+        let windowID = windowKey ?? "\(pid)-main"
+
         // FIX-Electron 步骤 2: 用 CGWindowList 的位置直接判断是否在目标屏
         if isBoundsInTargetFrame(bounds, targetFrame: targetFrame) {
             // 窗口在目标屏——更新位置记录
-            let windowID = "\(pid)-main"
             previousWindowPositions[windowID] = bounds.origin
             if !previousWindowPositionsOrderSet.contains(windowID) {
                 previousWindowPositionsOrder.append(windowID)
@@ -2154,7 +2162,6 @@ class WindowMover: ObservableObject {
         }
 
         // FIX-Electron 步骤 3: 窗口不在目标屏——需要 AX 引用来移动
-        let windowID = "\(pid)-main"
 
         // 冷却检查（外层已过滤，保留作为防御）
         if lastMovedWindows.contains(windowID) || movingWindows.contains(windowID) { return }
@@ -2184,6 +2191,13 @@ class WindowMover: ObservableObject {
         }
 
         guard let targetWindow = bestWindow else { return }
+
+        // FIX-问题23根因A: 全屏窗口在独立 Space，AX kAXPositionAttribute 设置被系统忽略——
+        // 方案 A：先退出全屏（退出后不自动重进），下一轮轮询以普通窗口身份搬回目标屏
+        if isWindowFullScreen(targetWindow) {
+            triggerExitFullScreen(pid: pid, window: targetWindow, windowID: windowID)
+            return
+        }
 
         // FIX-Electron 步骤 5: 执行移动
         movingWindows.insert(windowID)
@@ -2270,10 +2284,73 @@ class WindowMover: ObservableObject {
         // 窗口不在目标屏——冷却检查（与 checkWindowPosition 普通路径一致，在位置判断之后）
         if lastMovedWindows.contains(windowID) || movingWindows.contains(windowID) { return }
 
+        // FIX-问题23根因A: fastPath 同样可能命中全屏主窗口——先退出全屏再搬（方案 A）
+        if isWindowFullScreen(targetWindow) {
+            triggerExitFullScreen(pid: pid, window: targetWindow, windowID: windowID)
+            return
+        }
+
         // 直接移动（已有 AX 窗口引用）
         // FIX-侧边: 传入 bounds.size 作为 prebuiltSize，避免 AX 读取 size 失败导致居中偏移
         movingWindows.insert(windowID)
         moveWindowToTargetScreen(targetWindow, screenFrame: screenFrame, visibleFrame: targetFrame, windowID: windowID, prebuiltSize: bounds.size)
+    }
+
+    // MARK: - FIX-问题23: 全屏窗口处理（方案 A：退出全屏 → 移动，不自动重进）
+
+    /// 判断 AX 窗口是否处于 macOS 原生全屏态
+    /// 信号 1：subrole == AXFullScreenWindow（全屏窗口标准标识）
+    /// 信号 2：AXFullScreen 布尔属性 == true（部分应用只暴露此属性）
+    /// 注意：kAXFullScreenAttribute 常量在 Swift scope 不存在，属性名用字符串
+    private func isWindowFullScreen(_ window: AXUIElement) -> Bool {
+        if let subrole = copyAXString(window, attribute: kAXSubroleAttribute as CFString),
+           subrole == "AXFullScreenWindow" {
+            return true
+        }
+        var value: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &value) == .success,
+           let flag = value as? Bool, flag {
+            return true
+        }
+        return false
+    }
+
+    /// 触发退出全屏（方案 A：退出后**不**自动重进全屏——窗口以普通窗口身份被搬回目标屏，
+    /// 用户需要全屏时再手动点绿灯）
+    /// 全屏窗口在独立 Space，AX kAXPositionAttribute 设置被系统忽略，必须先退出全屏才能移动；
+    /// 退出后窗口回到原屏幕，由 100ms 轮询按普通窗口路径搬回目标屏
+    private func triggerExitFullScreen(pid: pid_t, window: AXUIElement, windowID: String) {
+        // 防重入：退出全屏动画约 0.5-1s，期间轮询每 100ms 命中一次，3s 冷却内不重复触发
+        if let last = fullscreenExitAttempts[pid], Date().timeIntervalSince(last) < 3.0 { return }
+        fullscreenExitAttempts[pid] = Date()
+
+        // 首选：直接置 AXFullScreen = false
+        var result = AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, kCFBooleanFalse)
+        if result != .success {
+            // 兜底：部分应用不支持设置 AXFullScreen 属性——按下全屏按钮（绿灯）退出。
+            // 仅当按钮 subrole 为 AXFullScreenButton 时按下，避免误触发普通窗口 AXZoomButton 的缩放
+            var buttonValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, kAXZoomButtonAttribute as CFString, &buttonValue) == .success,
+               let button = buttonValue {
+                var subroleValue: CFTypeRef?
+                if AXUIElementCopyAttributeValue(button as! AXUIElement, kAXSubroleAttribute as CFString, &subroleValue) == .success,
+                   let subrole = subroleValue as? String, subrole == "AXFullScreenButton" {
+                    result = AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
+                }
+            }
+        }
+        logger.info("triggerExitFullScreen: pid=\(pid, privacy: .public) windowID=\(windowID, privacy: .public) result=\(result.rawValue, privacy: .public)")
+
+        // 退出动画期间加入冷却，避免轮询在动画未完成时反复搬动
+        lastMovedWindows.insert(windowID)
+        let key = cooldownKey(windowID: windowID)
+        cooldownWorkItems[key]?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.lastMovedWindows.remove(windowID)
+            self?.cooldownWorkItems.removeValue(forKey: key)
+        }
+        cooldownWorkItems[key] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
     }
 
     /// 读取 AX 字符串属性辅助方法（用于生成稳定的窗口标识）

@@ -112,7 +112,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "326"
             endingLineNumber = "326"
-            landmarkName = "removeAXObserver(for:)"
+            landmarkName = "handleAXWindowCreated(pid:element:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -128,7 +128,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "403"
             endingLineNumber = "403"
-            landmarkName = "handlePinWindowMoved(pid:)"
+            landmarkName = "setupPinObserver(for:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -144,8 +144,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "411"
             endingLineNumber = "411"
-            landmarkName = "WindowMover"
-            landmarkType = "3">
+            landmarkName = "setupPinObserver(for:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -160,8 +160,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "422"
             endingLineNumber = "422"
-            landmarkName = "WindowMover"
-            landmarkType = "3">
+            landmarkName = "setupPinObserver(for:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -176,7 +176,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "487"
             endingLineNumber = "487"
-            landmarkName = "checkSinglePinnedApp(pid:)"
+            landmarkName = "handlePinWindowCreated(pid:element:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -192,7 +192,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "488"
             endingLineNumber = "488"
-            landmarkName = "checkSinglePinnedApp(pid:)"
+            landmarkName = "handlePinWindowCreated(pid:element:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -208,8 +208,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "412"
             endingLineNumber = "412"
-            landmarkName = "WindowMover"
-            landmarkType = "3">
+            landmarkName = "setupPinObserver(for:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -224,7 +224,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2289"
             endingLineNumber = "2289"
-            landmarkName = "verifyAndRecenterWindow(window:visibleFrame:windowID:)"
+            landmarkName = "checkWindowPositionFastPath(pid:screenFrame:targetFrame:screenID:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -240,7 +240,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2295"
             endingLineNumber = "2295"
-            landmarkName = "verifyAndRecenterWindow(window:visibleFrame:windowID:)"
+            landmarkName = "checkWindowPositionFastPath(pid:screenFrame:targetFrame:screenID:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -256,7 +256,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2285"
             endingLineNumber = "2285"
-            landmarkName = "verifyAndRecenterWindow(window:visibleFrame:windowID:)"
+            landmarkName = "checkWindowPositionFastPath(pid:screenFrame:targetFrame:screenID:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -272,7 +272,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2305"
             endingLineNumber = "2305"
-            landmarkName = "verifyAndRecenterWindow(window:visibleFrame:windowID:)"
+            landmarkName = "isWindowFullScreen(_:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -288,7 +288,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2311"
             endingLineNumber = "2311"
-            landmarkName = "getScreenInfo(for:)"
+            landmarkName = "isWindowFullScreen(_:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
