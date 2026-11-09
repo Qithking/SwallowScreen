@@ -10,8 +10,8 @@ import AppKit
 import os.log
 
 // MARK: - 下载窗口控制器
-/// RT10: 单例 + 复用窗口；多次下载只会有一个窗口，重复触发时聚焦已有窗口
-/// RT63: 显式 @MainActor，与 macOS 14+ NSWindowController 隔离保证一致
+/// 单例 + 复用窗口；多次下载只会有一个窗口，重复触发时聚焦已有窗口
+/// 显式 @MainActor，与 macOS 14+ NSWindowController 隔离保证一致
 @MainActor
 class DownloadWindowController: NSWindowController {
     static let shared = DownloadWindowController()
@@ -40,9 +40,7 @@ class DownloadWindowController: NSWindowController {
     }
 
     /// 打开或聚焦下载窗口
-    /// - Returns: (hostingController, contentView) 元组，调用方负责把 view 数据塞进 contentView
     func showWindow() {
-        // RT10: 窗口已可见则聚焦，不再创建
         if let w = window, !w.isVisible {
             w.center()
         }
@@ -50,11 +48,9 @@ class DownloadWindowController: NSWindowController {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// RT70: 封装"创建 contentViewController + 替换 + showWindow"流程
-    /// 调用方只需一行：DownloadWindowController.open(version:, downloadURL:)
+    /// 封装"创建 contentViewController + 替换 + showWindow"流程
     static func open(version: String, downloadURL: URL) {
         let controller = DownloadWindowController.shared
-        // RT30: window 防御
         guard let window = controller.window else {
             os_log("DownloadWindowController.window 为 nil，无法打开下载窗口",
                    log: OSLog.default, type: .error)
@@ -79,7 +75,7 @@ struct DownloadWindowContentView: View {
     // 下载完成后保存文件 URL，供"安装并重启"使用
     @State private var downloadedFileURL: URL?
 
-    // T23: 持有对自己窗口的弱引用，避免 closeWindow 误关其他窗口
+    // 持有对自己窗口的弱引用，避免 closeWindow 误关其他窗口
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var windowRef: NSWindow?
 
@@ -91,7 +87,6 @@ struct DownloadWindowContentView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            // 上半部分：左边图标 + 右边进度条
             HStack(spacing: 12) {
                 if let appIcon = NSImage(named: NSImage.applicationIconName) {
                     Image(nsImage: appIcon)
@@ -222,17 +217,13 @@ struct DownloadWindowContentView: View {
         DownloadManager.shared.download(
             from: downloadURL,
             urlKey: downloadURL.absoluteString,
-            // R-204: DownloadWindowContentView 是 struct（SwiftUI View）——值类型，
-            //        [weak self] 不适用（weak 只能用于 class/class-bound protocol），
-            //        也无 retain cycle 风险（struct 按值捕获）
-            //        原代码触发 3x `weak may only be applied to class types` + 3x `self never mutated`
-            // R-223: DownloadManager delegate 已通过 Task @MainActor 派发回主线程，
-            //        回调闭包已在主线程上执行，无需再 DispatchQueue.main.async 二次派发
+            // DownloadWindowContentView 是 struct（SwiftUI View），[weak self] 不适用，
+            // 按值捕获也无 retain cycle 风险
+            // delegate 回调已通过 Task @MainActor 派发回主线程，无需再二次派发
             onProgress: { progress in
                 self.downloadProgress = progress
             },
             onComplete: { localURL in
-                // 保存下载文件 URL，供"安装并重启"使用
                 self.downloadedFileURL = localURL
                 self.downloadStatus = .completed
             },
@@ -244,9 +235,8 @@ struct DownloadWindowContentView: View {
     }
 
     private func cancelDownload() {
-        // R-230: 标记为 failed 防止 didCompleteWithError 异步回调到达后修改 UI 状态
-        //        （cancel() 删除 callbacks，didCompleteWithError 找到 nil 后直接 return——
-        //        但时间窗口内 onError 可能在 callbacks 删除前被派发）
+        // 标记为 failed——cancel() 后的时间窗口内 onError 仍可能被派发，
+        // 防止异步回调再修改 UI 状态
         downloadStatus = .failed
         DownloadManager.shared.cancel(urlKey: downloadURL.absoluteString)
         closeWindow()
@@ -272,7 +262,7 @@ struct DownloadWindowContentView: View {
     }
 
     private func closeWindow() {
-        // T23: 关闭自己持有的窗口，绝不 fallback 到 keyWindow
+        // 关闭自己持有的窗口，绝不 fallback 到 keyWindow
         if let window = windowRef {
             window.close()
         } else {
@@ -305,11 +295,10 @@ private struct WindowAccessor: NSViewRepresentable {
 }
 
 // MARK: - 下载管理器
-// T15: 改为按 URL 串行化；同 URL 多次下载会取消旧 task
-// R-220: 恢复 @MainActor——activeTasks/callbacks 的读写必须串行化，
-//        delegateQueue: .main 不保证所有 delegate 回调在主线程（如 urlSessionDidFinishEvents
-//        forBackgroundURLSession 可能在后台线程）；assert 在 Release 中被移除无法保护。
-//        delegate 方法标 nonisolated + MainActor.run 派发，解决 Swift 6 strict concurrency
+// 按 URL 串行化：同 URL 多次下载会取消旧 task
+// @MainActor 保证 activeTasks/callbacks 读写串行化——delegateQueue: .main 不保证所有
+// delegate 回调在主线程，assert 在 Release 中被移除无法保护；
+// delegate 方法标 nonisolated + MainActor.run 派发，解决 Swift 6 strict concurrency
 @MainActor
 class DownloadManager: NSObject, URLSessionDownloadDelegate {
     static let shared = DownloadManager()
@@ -352,7 +341,7 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
         request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
 
         let task = session?.downloadTask(with: request)
-        // T19: 用 urlKey 作为 taskDescription 便于在 delegate 中回查
+        // 用 urlKey 作为 taskDescription 便于在 delegate 中回查
         task?.taskDescription = urlKey
         activeTasks[urlKey] = task
         task?.resume()
@@ -391,7 +380,7 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
 
         try? fileManager.removeItem(at: destinationURL)
 
-        // R-199: 移到后台线程执行 fileManager.copyItem——>100MB 文件不再阻塞主线程
+        // 移到后台线程执行 fileManager.copyItem——>100MB 文件不再阻塞主线程
         let locationCopy = location
         let urlKeyCapture = urlKey
         Task.detached(priority: .utility) {
@@ -403,12 +392,8 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
                         try? FileManager.default.removeItem(at: file)
                     }
                 }
-                // R-225: 集中到同一个 MainActor.run——onComplete + callbacks 清理 + activeTasks 清理
-                //        原代码用两个独立 Task @MainActor 清理 activeTasks，与 didCompleteWithError
-                //        中的 callbacks 清理存在数据竞态：两个 Task 执行顺序不确定，
-                //        可能先 activeTasks=nil → 后 callbacks 清理时 onComplete 已调用但
-                //        didCompleteWithError 也尝试 onError 同一 urlKey
-                //        集中清理后，onComplete 和 callbacks 清理在同一 MainActor.run 内原子完成
+                // 集中到同一个 MainActor.run：onComplete 与 callbacks/activeTasks 清理原子完成，
+                // 避免与 didCompleteWithError 的清理产生数据竞态
                 await MainActor.run { [weak self] in
                     self?.callbacks[urlKeyCapture]?.onComplete(destinationURL)
                     self?.callbacks[urlKeyCapture] = nil
@@ -443,10 +428,8 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
                 if (error as NSError).code == NSURLErrorCancelled {
                     return
                 }
-                // R-229: didFinishDownloadingTo 成功路径已在 R-225 MainActor.run 中清理
-                //        callbacks[urlKey] = nil；若此时 callbacks 为 nil，说明下载文件已
-                //        成功复制并回调 onComplete，此处不应再 onError——否则同一 urlKey
-                //        的 onComplete 和 onError 都被调用，UI 状态错乱
+                // 成功路径已清理 callbacks[urlKey]；若为 nil 说明 onComplete 已回调，
+                // 此处不应再 onError，否则同一 urlKey 两个回调都触发，UI 状态错乱
                 guard self?.callbacks[urlKey] != nil else { return }
                 os_log("下载失败: %{public}@", log: self?.log ?? OSLog.default, type: .error, error.localizedDescription)
                 self?.callbacks[urlKey]?.onError(error.localizedDescription)

@@ -2,11 +2,7 @@
 //  CooldownRegistry.swift
 //  SwallowScreen
 //
-//  冷却/进行中守卫统一注册表（问题24/D2 架构深化）
-//  收敛 WindowMover 内六处冷却变体（lastMovedWindows + cooldownWorkItems、
-//  movingWindows、fullscreenExitAttempts、axFallbackWorkItems、
-//  axObserverTimeoutItems）为单一键控实现，消除"Set + 配对 workItem 字典"
-//  的双状态维护。
+//  冷却/进行中守卫统一注册表：单一键控实现，收敛各类冷却/守卫/延迟任务状态
 //
 //  key 约定（调用方遵守）：
 //  - "move:<windowID>"   移动冷却（到期自动解除）
@@ -51,7 +47,6 @@ final class CooldownRegistry {
     // MARK: - 写入
 
     /// hold 型守卫：无到期时间，必须由 release/cancel 手动解除
-    /// （对应原 movingWindows 的"搬动进行中"语义）
     func hold(_ key: String) {
         lock.withLock { insert(key, workItem: nil) }
     }
@@ -62,7 +57,7 @@ final class CooldownRegistry {
     }
 
     /// 任务型冷却：插入条目并调度 workItem，到期自动移除条目后执行 onExpire
-    /// 若同键已有条目，先取消旧 workItem 再替换（与原"先 cancel 再重建"语义一致）
+    /// 若同键已有条目，先取消旧 workItem 再替换
     func coolDown(_ key: String,
                   duration: TimeInterval,
                   onExpire: (() -> Void)? = nil,

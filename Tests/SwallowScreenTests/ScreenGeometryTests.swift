@@ -2,7 +2,7 @@
 //  ScreenGeometryTests.swift
 //  SwallowScreenTests
 //
-//  屏幕几何纯函数的单元测试（swift test 运行；问题24/D4）
+//  屏幕几何纯函数的单元测试（swift test 运行）
 //
 
 import XCTest

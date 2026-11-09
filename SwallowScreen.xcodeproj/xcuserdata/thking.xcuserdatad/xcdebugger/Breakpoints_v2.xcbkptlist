@@ -160,8 +160,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "422"
             endingLineNumber = "422"
-            landmarkName = "setupPinObserver(for:)"
-            landmarkType = "7">
+            landmarkName = "pinObserverCallback"
+            landmarkType = "24">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -223,9 +223,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2289"
-            endingLineNumber = "2289"
-            landmarkName = "checkAccessibilityPermission()"
-            landmarkType = "7">
+            endingLineNumber = "2289">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -239,9 +237,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2295"
-            endingLineNumber = "2295"
-            landmarkName = "requestAccessibilityPermission()"
-            landmarkType = "7">
+            endingLineNumber = "2295">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -255,9 +251,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2285"
-            endingLineNumber = "2285"
-            landmarkName = "WindowMover"
-            landmarkType = "3">
+            endingLineNumber = "2285">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -271,9 +265,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2305"
-            endingLineNumber = "2305"
-            landmarkName = "triggerImmediateCheck()"
-            landmarkType = "7">
+            endingLineNumber = "2305">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy

@@ -2,12 +2,9 @@
 //  AXWindowReader.swift
 //  SwallowScreen
 //
-//  AX 属性读取统一入口（问题24/D1 架构深化）
-//  收敛 WindowMover 内散落的裸 AXUIElementCopyAttributeValue 四步样板
-//  （声明 CFTypeRef? → 调用 → 判 .success → 强转解包）为类型化读取。
-//
-//  统一语义：调用成功且值类型匹配才返回解包值，否则返回 nil。
-//  相比原样板的差异：.success 但值类型不符时不再强转崩溃，而是返回 nil（更安全）。
+//  AX 属性读取统一入口。
+//  统一语义：调用成功且值类型匹配才返回解包值，否则返回 nil
+//  （.success 但值类型不符时返回 nil，而非强转崩溃）。
 //
 
 import AppKit

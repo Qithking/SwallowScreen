@@ -12,19 +12,16 @@ import CoreGraphics
 
 struct ScreenInfo: Identifiable, Hashable {
     let id: UInt32  // CGDirectDisplayID
-    // R-222: name 仅存 screen.localizedName，不含分辨率后缀——
-    //        分辨率会随设置变化，导致 targetScreenName 匹配失败；
-    //        分辨率信息移到 displayName 中仅用于 UI 展示
+    // name 仅存 screen.localizedName，不含分辨率后缀——分辨率会随设置变化导致匹配失败；
+    // 分辨率信息在 resolutionSuffix 中，仅用于 UI 展示
     let name: String
-    // R-159: 本字段为兼容历史保留，存的是 screen.frame（含菜单栏/Dock 区域）；
-    //        判断屏幕包含关系请用 screen.visibleFrame（见 ScreenManager.screen(containing:)）
+    // 兼容历史保留：存的是 screen.frame（含菜单栏/Dock 区域）；
+    // 判断屏幕包含关系请用 visibleFrame（见 screen(containing:)）
     let frame: CGRect
-    // D3: 可用区域（排除菜单栏/Dock）——原 WindowMover 本地 ScreenInfo 并行持有此字段，
-    //     收敛后由本结构统一提供（回弹居中/可见区判定都依赖它）
+    // 可用区域（排除菜单栏/Dock）
     let visibleFrame: CGRect
     let isMain: Bool
     let serialNumber: String?  // 屏幕序列号，用于跨重启识别
-    // R-222: 分辨率后缀独立存储，仅用于 UI 展示
     let resolutionSuffix: String?
     
     var displayName: String {
@@ -45,7 +42,7 @@ struct ScreenInfo: Identifiable, Hashable {
 class ScreenManager: ObservableObject {
     @Published var screens: [ScreenInfo] = []
 
-    // RT120: 持有 addObserver 返回的 token；不持立即被 ARC 释放
+    // 持有 addObserver 返回的 token，否则会被 ARC 立即释放
     private var observerToken: NSObjectProtocol?
 
     init() {
@@ -59,7 +56,7 @@ class ScreenManager: ObservableObject {
         }
     }
 
-    /// RT7: 提供按 id/serialNumber/name 的统一查找接口
+    /// 提供按 id/serialNumber/name 的统一查找接口
     func screen(id: CGDirectDisplayID) -> ScreenInfo? {
         return screens.first { $0.id == id }
     }
@@ -70,16 +67,16 @@ class ScreenManager: ObservableObject {
 
     func screen(name: String) -> ScreenInfo? {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        // R-228: 精确匹配——优先匹配 ScreenInfo.name（仅 localizedName，R-222 后不含分辨率）
+        // 精确匹配：优先匹配 ScreenInfo.name（仅 localizedName，不含分辨率）
         if let exact = screens.first(where: {
             $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(normalized) == .orderedSame
         }) {
             return exact
         }
-        // R-228: 兼容旧版本——旧版存储的 targetScreenName 可能含分辨率后缀
-        //        （如 "DELL U2720Q (2560x1440)"），R-222 后 name 仅 localizedName
-        //        遍历所有屏，检查 normalized 是否以某个 screen.name 开头
-        //        （分辨率后缀格式为 " (WxH)"，空格+括号分隔）
+        // 兼容旧版本：旧版存储的 targetScreenName 可能含分辨率后缀
+        //（如 "DELL U2720Q (2560x1440)"），故做前缀匹配——
+        // 检查 normalized 是否以某个 screen.name 开头
+        //（分辨率后缀格式为 " (WxH)"，空格+括号分隔）
         for screen in screens {
             let screenName = screen.name.trimmingCharacters(in: .whitespacesAndNewlines)
             if !screenName.isEmpty && normalized.caseInsensitiveCompare(screenName) != .orderedSame
@@ -94,7 +91,7 @@ class ScreenManager: ObservableObject {
         return nil
     }
 
-    /// RT7: 使用 visibleFrame 匹配（原对齐 WindowMover.getScreenContainingPoint，后者已随 dead code 清理删除）
+    /// 使用 visibleFrame 匹配
     func screen(containing point: CGPoint) -> ScreenInfo? {
         for screen in NSScreen.screens {
             if screen.visibleFrame.contains(point) {
@@ -116,9 +113,8 @@ class ScreenManager: ObservableObject {
         return nil
     }
 
-    /// D3: 按 App 配置解析目标屏幕（原 WindowMover.resolveTargetFrame 并行实现收敛于此）
-    /// 匹配优先级：serialNumber → screenID → screenName，
-    /// 复用 screen(serialNumber:)/screen(id:)/screen(name:) 统一匹配逻辑
+    /// 按 App 配置解析目标屏幕
+    /// 匹配优先级：serialNumber → screenID → screenName
     /// - Returns: 匹配到的 ScreenInfo（含 frame/visibleFrame/id，供搬窗与可见区判定使用）
     func resolveTarget(for appInfo: AppInfo) -> ScreenInfo? {
         if let serialNumber = appInfo.targetScreenSerialNumber,
@@ -147,16 +143,14 @@ class ScreenManager: ObservableObject {
             let isMain = (CGDisplayIsMain(screenID) != 0)
             let serialNumber = ScreenManager.serialNumber(for: screen)
             
-            // 获取屏幕名称
-            // R-222: name 仅存 localizedName（稳定，不随分辨率变化）；
-            //        分辨率后缀存到 resolutionSuffix（仅用于 UI 展示）
+            // name 仅存 localizedName（稳定，不随分辨率变化）；
+            // 分辨率后缀存到 resolutionSuffix（仅用于 UI 展示）
             var screenName = "屏幕 \(index + 1)"
             let name = screen.localizedName
             if !name.isEmpty {
                 screenName = name
             }
             
-            // 如果是 Retina 屏幕或外接显示器，生成分辨率后缀
             var resolutionSuffix: String? = nil
             if screen.backingScaleFactor > 1.0 && NSScreen.screens.count > 1 {
                 let resolution = "\(Int(frame.width))x\(Int(frame.height))"
@@ -177,14 +171,13 @@ class ScreenManager: ObservableObject {
             screenList.append(info)
         }
         
-        // D3 兜底防抖: 兜底刷新每 2s 调一次，内容未变时不赋值，
-        //     避免 @Published screens 空触发 SwiftUI 无效刷新
+        // 内容未变时不赋值，避免 @Published screens 空触发 SwiftUI 无效刷新
         if screenList != screens {
             self.screens = screenList
         }
     }
     
-    /// T11: 屏幕序列号统一入口（与 AppDelegate/WindowMover 中旧实现格式一致）
+    /// 屏幕序列号统一入口
     /// 格式优先级：SN:CGDisplaySerialNumber → VM:vendor-model → ID:displayID
     static func serialNumber(for screen: NSScreen) -> String? {
         guard let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
@@ -204,8 +197,8 @@ class ScreenManager: ObservableObject {
     }
     
     private func setupScreenChangeObserver() {
-        // RT120: 持有 token——addObserver(forName:object:queue:using:) 返回的 token 必须被持有，
-        //       否则 observer 立即被 ARC 释放，拔插屏幕后 refreshScreens 永不触发
+        // addObserver 返回的 token 必须被持有，否则 observer 立即被 ARC 释放，
+        // 拔插屏幕后 refreshScreens 永不触发
         observerToken = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,

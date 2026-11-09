@@ -23,7 +23,6 @@ struct SettingsView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // 应用图标
             if let appIcon = NSImage(named: NSImage.applicationIconName) {
                 Image(nsImage: appIcon)
                     .resizable()
@@ -67,16 +66,14 @@ struct GeneralSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var appSettings: [AppSettings]
 
-    // RT40: 开机启动失败时 UI 显示一行告警
+    // 开机启动失败时 UI 显示一行告警
     @State private var launchAtLoginError: String?
 
-    // T22: 不再使用本地 @State 镜像，直接从 @Query 派生 Binding
     private var settings: AppSettings? { appSettings.first }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                // 基础设置卡片
                 SettingsCard(title: "基础设置") {
                     SettingsRow(
                         icon: "power.circle.fill",
@@ -84,7 +81,6 @@ struct GeneralSettingsView: View {
                         title: "开机启动",
                         subtitle: "登录时自动启动应用"
                     ) {
-                        // T22: Binding 直接绑定到 SwiftData 模型
                         if let s = settings {
                             @Bindable var bindable = s
                             Toggle("", isOn: $bindable.launchAtLogin)
@@ -95,7 +91,6 @@ struct GeneralSettingsView: View {
                                 }
                         }
                     }
-                    // RT40: 失败时显示告警文本
                     if let error = launchAtLoginError {
                         Text(error)
                             .font(.caption)
@@ -107,7 +102,6 @@ struct GeneralSettingsView: View {
                     Divider()
                         .padding(.vertical, 8)
 
-                    // 更新方式：决定更新包从官网直连还是经加速镜像下载
                     SettingsRow(
                         icon: "network.circle.fill",
                         iconColor: .purple,
@@ -129,7 +123,6 @@ struct GeneralSettingsView: View {
                     }
                 }
 
-                // 界面设置卡片
                 SettingsCard(title: "界面设置") {
                     SettingsRow(
                         icon: "questionmark.circle.fill",
@@ -174,8 +167,7 @@ struct GeneralSettingsView: View {
         if settings == nil {
             let newSettings = AppSettings()
             modelContext.insert(newSettings)
-            // R-193: 走 R-157 路径——失败时 os_log + 弹 NSAlert（与 updatePinToScreen 路径一致）
-            //        原 try? modelContext.save() 静默吞错，首次启动 settings 插入失败也无感知
+            // 失败时 os_log + 弹 NSAlert；原 try? 静默吞错，首次启动 settings 插入失败也无感知
             do {
                 try modelContext.save()
             } catch {
@@ -187,9 +179,7 @@ struct GeneralSettingsView: View {
 
     private func markUpdated() {
         settings?.updatedAt = Date()
-        // R-196: 显式 save——launchAtLogin / showHelpTips / checkUpdateOnLaunch 三个开关 onChange 都走这里
-        //        进程崩溃时这些修改 + updatedAt 都丢失
-        //        updatedAt 修改不致命，try? 可接受
+        // 显式 save——三个开关 onChange 都走这里，进程崩溃时不至于丢失修改；updatedAt 不致命，try? 可接受
         try? modelContext.save()
     }
 
@@ -201,12 +191,9 @@ struct GeneralSettingsView: View {
                 } else {
                     try SMAppService.mainApp.unregister()
                 }
-                // RT40: 成功时清空错误
                 launchAtLoginError = nil
             } catch {
-                // RT29: 统一改 os_log
                 os_log("设置开机启动失败: %{public}@", log: settingsLog, type: .error, error.localizedDescription)
-                // RT40: 失败时暴露给 UI
                 launchAtLoginError = "开机启动设置失败：\(error.localizedDescription)"
             }
         } else {
@@ -228,9 +215,9 @@ struct HotkeySettingsView: View {
 
     @State private var recordingHotkey: HotkeyType? = nil
     @State private var localMonitor: Any?
-    // T16: 录制会话的截止时间；过期后自动退出录制（避免按钮卡在"按下快捷键..."）
+    // 录制会话的截止时间；过期后自动退出录制（避免按钮卡在"按下快捷键..."）
     @State private var recordingDeadline: Date = .distantPast
-    // RT71: 改 DispatchSourceTimer，与 RT59/RT64 风格一致；不被主 RunLoop tracking mode 阻塞
+    // 用 DispatchSourceTimer，不被主 RunLoop tracking mode 阻塞
     @State private var recordingTimeoutTimer: DispatchSourceTimer?
     // 加载设置期间的标志，防止 onChange 在 loadSettings 时误触发 saveHotkey
     @State private var isLoadingSettings: Bool = false
@@ -250,7 +237,6 @@ struct HotkeySettingsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                // 快捷键说明
                 HStack {
                     Image(systemName: "keyboard")
                         .foregroundColor(.secondary)
@@ -260,7 +246,6 @@ struct HotkeySettingsView: View {
                     Spacer()
                 }
                 
-                // 设置前台应用屏幕
                 HotkeyCard(
                     title: "设置前台应用屏幕",
                     subtitle: "将当前应用固定到指定屏幕",
@@ -272,7 +257,6 @@ struct HotkeySettingsView: View {
                 .onChange(of: setScreenModifiers) { _, _ in if !isLoadingSettings { saveHotkey(.setScreen) } }
                 .onChange(of: setScreenKeyCode) { _, _ in if !isLoadingSettings { saveHotkey(.setScreen) } }
                 
-                // 取消前台应用屏幕设置
                 HotkeyCard(
                     title: "取消屏幕设置",
                     subtitle: "取消当前应用的屏幕固定",
@@ -289,14 +273,13 @@ struct HotkeySettingsView: View {
         .onAppear {
             loadSettings()
         }
-        // RT51: view 消失时只调 stopRecording/Timeout，避免重复设 nil 触发 onChange
+        // view 消失时只调 stopRecording/Timeout，避免重复设 nil 触发 onChange
         .onDisappear {
             stopRecording()
             stopRecordingTimeout()
         }
         .onChange(of: recordingHotkey) { _, newValue in
             if newValue != nil {
-                // T16: 进入录制时设置 8s 截止时间
                 recordingDeadline = Date().addingTimeInterval(8.0)
                 startRecording()
                 startRecordingTimeout()
@@ -309,13 +292,12 @@ struct HotkeySettingsView: View {
 
     private func startRecordingTimeout() {
         recordingTimeoutTimer?.cancel()
-        // RT71: 改用 DispatchSourceTimer，与 RT59/RT64 风格一致
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
         timer.setEventHandler { [weak timer] in
             guard let _ = timer else { return }
-            // R-211: 删除 [weak self]——HotkeySettingsView 是 struct，weak 不适用
-            //        timer 自身的生命周期由 stopRecordingTimeout / 重新 start 控制
+            // 不用 [weak self]——HotkeySettingsView 是 struct，weak 不适用；
+            // timer 生命周期由 stopRecordingTimeout / 重新 start 控制
             Task { @MainActor in
                 if Date() >= self.recordingDeadline {
                     self.recordingHotkey = nil
@@ -332,12 +314,11 @@ struct HotkeySettingsView: View {
     }
     
     private func startRecording() {
-        // RT107: 入口守门——recordingHotkey == nil 时绝不安装 monitor，避免 race window
+        // 入口守门——recordingHotkey == nil 时绝不安装 monitor，避免竞态窗口
         guard recordingHotkey != nil else { return }
 
-        // RT26: [weak self] 避免 retain cycle
-        // R-211: 删除 [weak self]——HotkeySettingsView 是 struct，weak 不适用
-        //        localMonitor 在 stopRecording() / startRecording() 入口被替换，旧 monitor 引用自动释放
+        // HotkeySettingsView 是 struct，weak 不适用；
+        // localMonitor 在 stopRecording() / startRecording() 入口被替换，旧 monitor 引用自动释放
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let keyCode = UInt32(event.keyCode)
             var flags: UInt32 = 0
@@ -347,9 +328,7 @@ struct HotkeySettingsView: View {
             if event.modifierFlags.contains(.option) { flags |= UInt32(optionKey) }
             if event.modifierFlags.contains(.control) { flags |= UInt32(controlKey) }
 
-            // RT107: 录制期间 keyDown 必须吞掉（return nil），
-            //       防止 Cmd+Shift+1 等被传到前台 App 误触发
-            //       monitor 安装时已 guard recordingHotkey != nil，所以这里不需要再判断
+            // 录制期间 keyDown 必须吞掉（return nil），防止 Cmd+Shift+1 等被传到前台 App 误触发
             if keyCode == 0x35 {
                 // Esc: 取消录制
                 self.recordingHotkey = nil
@@ -369,11 +348,9 @@ struct HotkeySettingsView: View {
                 0x3A, 0x3D  // Opt, OptR
             ]
             if modifierKeyCodes.contains(keyCode) {
-                // 吞掉但不更新快捷键
                 return nil
             }
 
-            // 正常录制：更新快捷键并退出
             self.setRecordedHotkey(keyCode: keyCode, flags: flags)
             self.recordingHotkey = nil
             return nil
@@ -428,8 +405,7 @@ struct HotkeySettingsView: View {
                 settings.clearScreenModifiers = modifiersToCarbon(clearScreenModifiers)
             }
             settings.updatedAt = Date()
-            // R-198: 仅成功时 post 通知——失败时 hotkey 不应被旧值重注册
-            //        R-194 已加 do/try/catch，本轮把 NotificationCenter.post 移到成功路径内
+            // 仅成功时 post 通知——失败时 hotkey 不应被旧值重注册
             do {
                 try modelContext.save()
                 NotificationCenter.default.post(name: .hotkeysUpdated, object: nil)
@@ -460,14 +436,12 @@ struct AboutView: View {
     @State private var currentVersion: String = ""
     @State private var latestVersion: String = ""
     @State private var isCheckingUpdate: Bool = false
-    // RT106: UpdateStatus 抽到 UpdateChecker 统一引用
     @State private var updateStatus: UpdateChecker.UpdateStatus = .idle
     @State private var downloadURL: String = ""
 
     var body: some View {
         VStack(spacing: 16) {            
             
-            // 应用名称和版本
             VStack(spacing: 4) {
                 Text("SwallowScreen")
                     .font(.headline)
@@ -477,7 +451,6 @@ struct AboutView: View {
                     .foregroundColor(.secondary)
             }
             
-            // 按钮
             VStack(spacing: 10) {
                 LinkButton(title: "反馈问题", icon: "envelope", action: feedback)
                 LinkButton(title: "GitHub 项目", icon: "link", action: openGitHub)
@@ -518,7 +491,6 @@ struct AboutView: View {
                 }
             }
             
-            // 版权
             Text("© 2026 Qithking. GPLv3.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -527,7 +499,7 @@ struct AboutView: View {
         .padding(.vertical, 16)
         .onAppear {
             loadCurrentVersion()
-            // RT44: 与 AppPopoverView.onAppear 守门一致：受 checkUpdateOnLaunch 控制
+            // 受 checkUpdateOnLaunch 控制，与 AppPopoverView.onAppear 守门一致
             if appSettings.first?.checkUpdateOnLaunch ?? true {
                 checkForUpdate()
             }
@@ -559,7 +531,7 @@ struct AboutView: View {
         isCheckingUpdate = true
         updateStatus = .checking
 
-        // R-211: 删除 [weak self]——AboutView 是 struct，weak 不适用
+        // AboutView 是 struct，weak 不适用
         UpdateChecker.shared.check { result in
             isCheckingUpdate = false
             switch result {
@@ -579,7 +551,6 @@ struct AboutView: View {
     
     private func openDownloadWindow() {
         guard let url = URL(string: downloadURL) else { return }
-        // RT70: 抽到 DownloadWindowController.open 静态方法
         DownloadWindowController.open(version: latestVersion, downloadURL: url)
     }
     
@@ -742,7 +713,7 @@ struct HotkeyCard: View {
         )
     }
     
-    // FIX-#15: 键码表提为 static let——原函数体内每次渲染都重建 70+ 条目的字典（L688 每帧调用）
+    // 键码表提为 static let，避免每次渲染都重建 70+ 条目的字典
     private static let keyCodeNames: [UInt32: String] = [
             0x00: "A", 0x01: "S", 0x02: "D", 0x03: "F", 0x04: "H", 0x05: "G", 0x06: "Z", 0x07: "X",
             0x08: "C", 0x09: "V", 0x0B: "B", 0x0C: "Q", 0x0D: "W", 0x0E: "E", 0x0F: "R",
@@ -754,21 +725,21 @@ struct HotkeyCard: View {
             0x24: "Enter", 0x30: "Tab", 0x33: "Delete", 0x35: "Esc",
             0x7A: "F1", 0x78: "F2", 0x63: "F3", 0x76: "F4", 0x60: "F5", 0x61: "F6",
             0x62: "F7", 0x64: "F8", 0x65: "F9", 0x6D: "F10", 0x67: "F11", 0x6F: "F12",
-            // T20: 补充 F13-F19
+            // F13-F19
             0x69: "F13", 0x6B: "F14", 0x71: "F15", 0x6A: "F16", 0x40: "F17", 0x4F: "F18", 0x50: "F19",
-            // T20: 方向键
+            // 方向键
             0x7B: "←", 0x7C: "→", 0x7D: "↓", 0x7E: "↑",
-            // T20: 小键盘键（Numpad）
+            // 小键盘键（Numpad）
             0x52: "Num0", 0x53: "Num1", 0x54: "Num2", 0x55: "Num3", 0x56: "Num4",
             0x57: "Num5", 0x58: "Num6", 0x59: "Num7", 0x5B: "Num8", 0x5C: "Num9",
             0x43: "Num*", 0x45: "Num+", 0x4B: "Num/", 0x4E: "Num-",
             0x51: "Num=", 0x4C: "NumEnter", 0x41: "Num.",
-            // T20: 修饰键 / 编辑键
+            // 修饰键 / 编辑键
             0x38: "Shift", 0x3C: "ShiftR",
             0x3B: "Ctrl", 0x3E: "CtrlR",
             0x37: "Cmd", 0x36: "CmdR",
             0x3A: "Opt", 0x3D: "OptR",
-            // RT27: 修正键码映射（与 Carbon.HIToolbox.Events.h 对齐）
+            // 键码与 Carbon.HIToolbox.Events.h 对齐
             0x72: "Help", 0x47: "NumClear",
             0x73: "Home", 0x74: "PgDn", 0x75: "End", 0x79: "PgUp",
             0x39: "CapsLock"

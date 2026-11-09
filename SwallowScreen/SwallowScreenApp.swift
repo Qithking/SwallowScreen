@@ -13,7 +13,7 @@ struct SwallowScreenApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // RT35: 占位 Settings scene 改为 EmptyView，避免 Cmd+, 弹出"SwallowScreen"空窗
+        // 占位 Settings scene 用 EmptyView，避免 Cmd+, 弹出"SwallowScreen"空窗
         // AppDelegate 自身处理菜单栏图标与自定义设置窗口
         Settings {
             EmptyView()

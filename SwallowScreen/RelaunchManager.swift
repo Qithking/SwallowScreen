@@ -24,7 +24,6 @@ final class RelaunchManager {
         let currentPID = ProcessInfo.processInfo.processIdentifier
         let fileExtension = downloadURL.pathExtension.lowercased()
 
-        // 确定目标安装路径：当前在 /Applications 则原地替换，否则安装到 /Applications
         let targetAppURL: URL
         if currentAppURL.path.hasPrefix("/Applications/") {
             targetAppURL = currentAppURL
@@ -33,7 +32,6 @@ final class RelaunchManager {
                 .appendingPathComponent(currentAppURL.lastPathComponent)
         }
 
-        // 创建临时脚本
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("SwallowScreen_update_\(UUID().uuidString).sh")
 
@@ -69,7 +67,6 @@ final class RelaunchManager {
             return
         }
 
-        // 后台执行脚本
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptURL.path]

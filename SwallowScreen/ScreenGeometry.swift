@@ -2,9 +2,8 @@
 //  ScreenGeometry.swift
 //  SwallowScreen
 //
-//  屏幕几何纯函数（问题24/D4 架构深化）
-//  原 WindowMover 内三个无状态几何判定函数外移至此，随 SwallowScreenCore
-//  编译进单元测试（GUI 主模块含 SwiftData/@Preview 无法独立编译）。
+//  屏幕几何纯函数，随 SwallowScreenCore 编译进单元测试
+//  （GUI 主模块含 SwiftData/@Preview，无法独立编译）。
 //
 //  坐标系说明：
 //  - bounds（窗口）：CGWindowList / AX 均为 TL 坐标系（左上原点，Y 向下）
@@ -38,7 +37,6 @@ enum ScreenGeometry {
     }
 
     /// 判断窗口是否"在目标屏合理位置"：中心点在 visibleFrame 内 AND 至少 50% 面积重叠
-    /// （FIX-自由移动 引入的双条件判定）
     static func isBoundsInTargetFrame(_ bounds: CGRect,
                                       targetFrame: CGRect,
                                       screenHeight: CGFloat) -> Bool {

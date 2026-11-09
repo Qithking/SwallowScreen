@@ -16,8 +16,8 @@ import SwallowScreenCore
 
 struct AppPopoverView: View {
     @Environment(\.modelContext) private var modelContext
-    // P0-持久化: 改 @EnvironmentObject——由 AppDelegate 注入，跨 popover 生命周期复用
-    // 之前：@StateObject 每次 popover 重建时创建新实例 → 扫描目录 + 图标缓存重建
+    // 改用 @EnvironmentObject：由 AppDelegate 注入，跨 popover 生命周期复用；
+    // @StateObject 每次 popover 重建都会重扫目录和图标缓存
     @EnvironmentObject private var appManager: AppManager
     @EnvironmentObject private var screenManager: ScreenManager
     
@@ -27,51 +27,42 @@ struct AppPopoverView: View {
     @State private var searchText = ""
     @State private var selectedAppForConfig: SystemApp?
 
-    // R-155: 删除 @State settings 改用 appSettings.first——避免与 @Query appSettings 双数据源不一致
     @State private var showWelcomeTip: Bool = false
     
-    // 检查更新相关状态
     @State private var isCheckingUpdate: Bool = false
-    // RT106: UpdateStatus 抽到 UpdateChecker 统一引用
     @State private var updateStatus: UpdateChecker.UpdateStatus = .idle
     @State private var latestVersion: String = ""
     @State private var downloadURL: String = ""
     
     var body: some View {
         ZStack {
-            // 毛玻璃背景
             backgroundView
             
             VStack(spacing: 0) {
-                // 首次使用提示
                 if showWelcomeTip {
                     welcomeTipView
                 }
-                // 第一部分：搜索区域
                 searchArea
                 
                 Divider()
                 
-                // 第二部分：应用列表区域
                 appListArea
                 
                 Divider()
                 
-                // 第三部分：系统设置工具栏
                 toolbarArea
             }
         }
         .frame(width: 360, height: 500)
         .onAppear {
-            // P0-持久化: AppManager 跨 popover 生命周期复用，需在每次打开时重置搜索状态
-            // 否则上次搜索词/过滤结果残留，搜索框为空但列表显示上次过滤结果
+            // AppManager 跨 popover 生命周期复用，需在每次打开时重置搜索状态，
+            // 否则上次搜索词/过滤结果残留
             if appManager.searchText != "" {
                 appManager.searchText = ""
             }
             setupSettings()
             refreshScreens()
             checkWelcomeTip()
-            // 根据设置决定是否检查更新
             if appSettings.first?.checkUpdateOnLaunch ?? true {
                 autoCheckForUpdate()
             }
@@ -156,7 +147,6 @@ struct AppPopoverView: View {
     }
     
     private func checkWelcomeTip() {
-        // R-155: 改用 appSettings.first（@Query 自动反映 SwiftData 变化）——不再依赖 setupSettings 设的 @State
         if let settings = appSettings.first, settings.showHelpTips {
             showWelcomeTip = true
         }
@@ -192,7 +182,6 @@ struct AppPopoverView: View {
     private var appListArea: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                // RT50: 扫描中显示 loading 占位
                 if appManager.installedApps.isEmpty {
                     HStack {
                         Spacer()
@@ -219,7 +208,6 @@ struct AppPopoverView: View {
                             onPinToScreenChanged: { pinned in
                                 updatePinToScreen(app: app, pinned: pinned)
                             },
-                            // M2: 注入按需图标加载入口
                             onRequestIcon: { completion in
                                 appManager.requestIcon(for: app, completion: completion)
                             }
@@ -236,7 +224,6 @@ struct AppPopoverView: View {
     // MARK: - 工具栏区域
     private var toolbarArea: some View {
         HStack {
-            // 左侧：设置按钮
             Button(action: {
                 openSettingsWindow()
             }) {
@@ -250,7 +237,6 @@ struct AppPopoverView: View {
             
             Spacer()
             
-            // 右侧：检查更新和退出按钮
             Button(action: {
                 checkForUpdate()
             }) {
@@ -291,8 +277,7 @@ struct AppPopoverView: View {
             if results.isEmpty {
                 let newSettings = AppSettings()
                 modelContext.insert(newSettings)
-                // R-191: 走 R-157 路径——失败时 os_log + 弹 NSAlert（与 updatePinToScreen 路径一致）
-                //        原 try? modelContext.save() 静默吞错，首次启动 settings 不持久化也无感知
+                // 失败时 os_log + 弹 NSAlert；原 try? 静默吞错，首次启动 settings 不持久化也无感知
                 do {
                     try modelContext.save()
                 } catch {
@@ -300,7 +285,6 @@ struct AppPopoverView: View {
                     AppDelegate.showSaveErrorAlert(error: error)
                 }
             }
-            // R-155: 不再写 @State settings——appSettings.first 始终反映 @Query 自动结果
         } catch {
             os_log("setupSettings fetch 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
         }
@@ -323,9 +307,9 @@ struct AppPopoverView: View {
                let screen = screenManager.screens.first(where: { $0.id == screenID }) {
                 return screen
             }
-            // 3. 通过 name 匹配——走 screenManager.screen(name:) 统一入口
-            //        R-228: screen(name:) 内含旧版分辨率后缀兼容逻辑（如 "DELL U2720Q (2560x1440)"），
-            //        此处之前用 $0.name == screenName 精确匹配，旧版 targetScreenName 会匹配失败
+            // 3. 通过 name 匹配——走 screenManager.screen(name:) 统一入口，
+            //    内含旧版分辨率后缀兼容逻辑（如 "DELL U2720Q (2560x1440)"），
+            //    用 name 精确匹配会对旧版 targetScreenName 匹配失败
             if let screenName = appInfo.targetScreenName {
                 return screenManager.screen(name: screenName)
             }
@@ -340,15 +324,15 @@ struct AppPopoverView: View {
                 screenName: screen?.name,
                 screenSerialNumber: screen?.serialNumber
             )
-            // FIX: 清空目标屏幕时同步关闭 pinToScreen——pin 需要目标屏幕才有意义，
+            // 清空目标屏幕时同步关闭 pinToScreen——pin 需要目标屏幕才有意义，
             // 否则 pinToScreen=true 但无目标屏幕是无效状态，pinObserver 不会创建但 UI 上 pin 仍亮着
             // 必须在 isEnabled 逻辑之前执行，否则 isEnabled 不会正确关闭
             if screen == nil && existingInfo.pinToScreen {
                 existingInfo.updatePinToScreen(false)
             }
-            // R-226: 选屏 ↔ isEnabled 双向同步——与 AppDelegate.setCurrentAppScreen/clearCurrentAppScreen 对齐
-            //        选 nil 屏（"不指定"）= 无目标屏幕 = isEnabled=false，避免定时器空转
-            //        选非 nil 屏 = 有目标屏幕 = isEnabled=true，恢复屏幕规则
+            // 选屏 ↔ isEnabled 双向同步——与 AppDelegate.setCurrentAppScreen/clearCurrentAppScreen 对齐：
+            // 选 nil 屏（"不指定"）= 无目标屏幕 = isEnabled=false，避免定时器空转
+            // 选非 nil 屏 = 有目标屏幕 = isEnabled=true，恢复屏幕规则
             if screen != nil && !existingInfo.isEnabled {
                 existingInfo.isEnabled = true
             } else if screen == nil && existingInfo.isEnabled && !existingInfo.pinToScreen {
@@ -362,7 +346,7 @@ struct AppPopoverView: View {
                 targetScreenName: screen?.name,
                 targetScreenSerialNumber: screen?.serialNumber
             )
-            // FIX: 与 if 分支对齐——无目标屏幕时 isEnabled = false，
+            // 与 if 分支对齐——无目标屏幕时 isEnabled = false，
             // 避免 isEnabled=true 但无目标屏幕的无效状态
             if screen == nil {
                 newInfo.isEnabled = false
@@ -370,11 +354,10 @@ struct AppPopoverView: View {
             modelContext.insert(newInfo)
         }
 
-        // R-192: 走 R-157 路径——失败时 os_log + 弹 NSAlert（与 updatePinToScreen 路径一致）
-        //        原 try? modelContext.save() 静默吞错，屏幕配置修改丢失也无感知
+        // 失败时 os_log + 弹 NSAlert；原 try? 静默吞错，屏幕配置修改丢失也无感知
         do {
             try modelContext.save()
-            // FIX: 选屏后通知 WindowMover 刷新缓存和 pinObserver，与 updatePinToScreen 对齐
+            // 选屏后通知 WindowMover 刷新缓存和 pinObserver，与 updatePinToScreen 对齐
             NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
         } catch {
             os_log("configureApp save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
@@ -391,9 +374,8 @@ struct AppPopoverView: View {
     
     private func updatePinToScreen(app: SystemApp, pinned: Bool) {
         if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-            // R-217: 启用 pin 时校验是否已配目标屏——无 targetScreen 的 pin 是 silent no-op
-            //        写库成功但 checkAndEnforcePinnedWindows 的 resolveTargetFrame 返回 nil → 静默跳过
-            //        此处显式拒绝，给用户告警
+            // 启用 pin 时校验是否已配目标屏——无 targetScreen 的 pin 是静默无效操作
+            // （写库成功但 resolveTargetFrame 返回 nil → 静默跳过），此处显式拒绝并告警
             if pinned && existingInfo.targetScreenID == nil
                 && existingInfo.targetScreenSerialNumber == nil
                 && existingInfo.targetScreenName == nil {
@@ -408,9 +390,8 @@ struct AppPopoverView: View {
                 return
             }
             existingInfo.updatePinToScreen(pinned)
-            // R-226: 关闭 pin 时同步禁用规则——pin 关闭后无持续监控需求，
-            //        但若仍有目标屏幕则保留 isEnabled（下次启动仍搬动），
-            //        仅在无目标屏幕时才禁用
+            // 关闭 pin 时同步禁用规则——pin 关闭后无持续监控需求，
+            // 但若仍有目标屏幕则保留 isEnabled（下次启动仍搬动），仅在无目标屏幕时才禁用
             if !pinned && existingInfo.isEnabled
                 && existingInfo.targetScreenID == nil
                 && existingInfo.targetScreenSerialNumber == nil
@@ -418,7 +399,7 @@ struct AppPopoverView: View {
                 existingInfo.isEnabled = false
             }
         } else {
-            // R-217: 新建时同样校验——无 targetScreen 的新 App 不能直接启用 pin
+            // 新建时同样校验——无 targetScreen 的新 App 不能直接启用 pin
             if pinned {
                 let error = NSError(
                     domain: "PinToScreen",
@@ -438,7 +419,7 @@ struct AppPopoverView: View {
             modelContext.insert(newInfo)
         }
 
-        // R-157: 与 setCurrentAppScreen / clearCurrentAppScreen 路径一致——失败时弹 NSAlert
+        // 与 setCurrentAppScreen / clearCurrentAppScreen 路径一致——失败时弹 NSAlert
         do {
             try modelContext.save()
         } catch {
@@ -447,9 +428,8 @@ struct AppPopoverView: View {
         }
 
         // 启用或关闭固定屏幕时，立即触发检查
-        // FIX-pinToScreen关闭不生效: 关闭 pinToScreen 时也必须发通知，
-        // 否则 WindowMover 的 cachedPinnedApps 不会刷新，pinObserver 不会被移除，
-        // 100ms 定时器仍会把窗口搬回目标屏幕
+        // 关闭 pinToScreen 时也必须发通知，否则 WindowMover 的 cachedPinnedApps 不会刷新，
+        // pinObserver 不会被移除，100ms 定时器仍会把窗口搬回目标屏幕
         NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
     }
     
@@ -457,10 +437,8 @@ struct AppPopoverView: View {
         if let settings = appSettings.first {
             update(settings)
             settings.updatedAt = Date()
-            // R-189: 显式 save——SwiftData view context 自动 save 时机不确定，
-            //        进程崩溃时 `showHelpTips = false` 等设置修改丢失
-            //        （welcomeTipView "不再显示" 按钮调此闭包）
-            //        showHelpTips 修改不致命，try? 可接受
+            // 显式 save——SwiftData view context 自动 save 时机不确定，进程崩溃时设置修改丢失；
+            // showHelpTips 修改不致命，try? 可接受
             try? modelContext.save()
         }
     }
@@ -483,11 +461,9 @@ struct AppPopoverView: View {
         }
     }
     
-    // RT32: 自动检查更新（启动时调用）—— checkUpdateOnLaunch 判断收敛到 onAppear 入口
-    // R-188: 入口 isCheckingUpdate = true + 回调内 false——与 checkForUpdate 行为一致，
-    //        启动期检查更新时按钮 ProgressView 正常显示
-    // R-211: 删除闭包 [weak self]——AppPopoverView 是 struct，weak 不适用；
-    //        struct 按值捕获，无 retain cycle 风险
+    // 自动检查更新（启动时调用）
+    // 入口 isCheckingUpdate = true + 回调内 false，与 checkForUpdate 行为一致；
+    // 闭包不用 [weak self]——AppPopoverView 是 struct，按值捕获，无 retain cycle 风险
     private func autoCheckForUpdate() {
         guard !isCheckingUpdate else { return }
         isCheckingUpdate = true
@@ -508,8 +484,7 @@ struct AppPopoverView: View {
         }
     }
 
-    // 手动检查更新（按钮调用）
-    // R-211: 删除 [weak self]——AppPopoverView 是 struct，weak 不适用
+    // 手动检查更新（按钮调用）；struct 按值捕获，无 retain cycle 风险
     private func checkForUpdate() {
         guard !isCheckingUpdate else { return }
         isCheckingUpdate = true
@@ -539,7 +514,6 @@ struct AppPopoverView: View {
         // 按设置的更新方式解析下载渠道：官网直连 / gh-proxy 加速（脏数据兜底官网）
         let channel = UpdateChannel(rawValue: appSettings.first?.updateChannel ?? "") ?? .github
         let resolved = URL(string: channel.resolveDownloadURL(url.absoluteString)) ?? url
-        // RT70: 抽到 DownloadWindowController.open 静态方法
         DownloadWindowController.open(version: latestVersion, downloadURL: resolved)
     }
 }
@@ -550,19 +524,18 @@ struct AppRowView: View {
     let screens: [ScreenInfo]
     let selectedScreen: ScreenInfo?
     let isPinToScreen: Bool
-    let isMenuBarApp: Bool  // 是否是菜单栏应用
+    let isMenuBarApp: Bool
     let onScreenSelected: (ScreenInfo?) -> Void
     let onPinToScreenChanged: (Bool) -> Void
-    // M2: 图标按需懒加载入口；AppPopoverView 注入 AppManager.requestIcon 闭包
+    // 图标按需懒加载入口；AppPopoverView 注入 AppManager.requestIcon 闭包
     let onRequestIcon: ((@escaping @MainActor (NSImage?) -> Void) -> Void)?
 
     @State private var isHovering = false
-    @State private var displayIcon: NSImage? = nil  // M2: 行级图标缓存，触发时更新
+    @State private var displayIcon: NSImage? = nil  // 行级图标缓存，触发时更新
 
     var body: some View {
         HStack(spacing: 8) {
-            // 固定屏幕图标
-            // R-217: 未选屏幕时禁用 pin 按钮——避免用户开启无 targetScreen 的 pin（silent no-op）
+            // 未选屏幕时禁用 pin 按钮——避免开启无 targetScreen 的 pin（静默无效）
             Button(action: {
                 onPinToScreenChanged(!isPinToScreen)
             }) {
@@ -576,7 +549,7 @@ struct AppRowView: View {
                   ? "请先选择屏幕，然后再启用固定屏幕"
                   : "固定屏幕：开启后该应用只能在此屏幕显示")
 
-            // 应用图标（M2: 优先用 displayIcon，再回退 app.icon，最后 SF Symbol）
+            // 图标优先级：displayIcon → app.icon → SF Symbol
             if let icon = displayIcon ?? app.icon {
                 Image(nsImage: icon)
                     .resizable()
@@ -587,12 +560,10 @@ struct AppRowView: View {
                     .foregroundColor(.accentColor)
             }
             
-            // 应用名称
             Text(app.name)
                 .lineLimit(1)
                 .truncationMode(.tail)
             
-            // 菜单栏应用标记
             if isMenuBarApp {
                 Image(systemName: "menubar.rectangle")
                     .font(.caption)
@@ -644,7 +615,7 @@ struct AppRowView: View {
                     RoundedRectangle(cornerRadius: 4)
                         .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
                 )
-                .frame(maxWidth: 180, alignment: .trailing) // 360px窗口的50%
+                .frame(maxWidth: 180, alignment: .trailing)
             }
             .menuStyle(.borderlessButton)
         }
@@ -654,7 +625,7 @@ struct AppRowView: View {
         .onHover { hovering in
             isHovering = hovering
         }
-        // M2: 行首次可见时触发按需图标加载；displayIcon / app.icon 命中则跳过
+        // 行首次可见时触发按需图标加载；displayIcon / app.icon 命中则跳过
         .onAppear {
             guard displayIcon == nil, app.icon == nil else { return }
             onRequestIcon? { [self] icon in
