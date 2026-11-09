@@ -786,7 +786,11 @@ class WindowMover: ObservableObject {
         guard isMonitoring else { return }
         // 链 ID 校验：stopMonitoring 后该 pid 的链已失效（stop→start 新会话有新 ID）
         guard axFallbackProbeIDs[pid] == probeID else { return }
-        guard Date().timeIntervalSince(startedAt) < timeout else { return }
+        guard Date().timeIntervalSince(startedAt) < timeout else {
+            // 超时自停止——清理链 ID 避免残留
+            axFallbackProbeIDs.removeValue(forKey: pid)
+            return
+        }
         // PID 复用防御——进程必须存在且 launchDate 与调度时刻一致
         guard let currentApp = NSRunningApplication(processIdentifier: pid) else { return }
         if let launchDate = launchDate, currentApp.launchDate != launchDate {
@@ -804,9 +808,15 @@ class WindowMover: ObservableObject {
             return
         }
         if isBoundsInTargetFrame(currentBounds, targetFrame: targetFrame) {
+            // 窗口已在目标屏（可能已被 AXObserver/CG 链搬动）——停轮询链防重复 startStabilityCheck
+            stopDetectionTimers(pid: pid)
+            axFallbackProbeIDs.removeValue(forKey: pid)
             logger.info("AX 兜底: 窗口已在目标屏幕 pid=\(pid, privacy: .public)")
             return
         }
+        // 停止 CG/AX 轮询链——防其在 fallback 搬动后再次命中无条件重复搬动（onWindowDetected 无位置前置检查）+ 双 stability timer
+        stopDetectionTimers(pid: pid)
+        axFallbackProbeIDs.removeValue(forKey: pid)
         logger.info("AX 兜底: 窗口不在目标屏幕，执行搬窗 pid=\(pid, privacy: .public) current=\(NSStringFromRect(currentBounds), privacy: .public) target=\(NSStringFromRect(targetFrame), privacy: .public)")
         hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
@@ -2089,10 +2099,11 @@ class WindowMover: ObservableObject {
     // 转换公式: y_TL = primaryScreenHeight - y_BL
     //   primaryScreenHeight = NSScreen.screens[0].frame.height (主屏幕永远是 screens[0])
     // 多屏安全: 该公式是全局的，对所有屏幕（主屏/副屏）均适用。
+    // 无头环境安全: 显示器全拔/远程断开时 NSScreen.screens 可能为空，first 防御防数组越界
 
-    /// 主屏幕高度（BL 坐标系的全局 Y 轴最大值）
+    /// 主屏幕高度（BL 坐标系的全局 Y 轴最大值）；无屏时返回 0（调用方跳过搬动判断）
     private var primaryScreenHeight: CGFloat {
-        NSScreen.screens[0].frame.height
+        NSScreen.screens.first?.frame.height ?? 0
     }
 
     /// 将 BL 坐标系的 Y 值转换为 TL 坐标系

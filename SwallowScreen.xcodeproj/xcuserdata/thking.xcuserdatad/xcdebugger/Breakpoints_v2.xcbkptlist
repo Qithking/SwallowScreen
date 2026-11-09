@@ -223,7 +223,9 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2289"
-            endingLineNumber = "2289">
+            endingLineNumber = "2289"
+            landmarkName = "WindowMover"
+            landmarkType = "3">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -237,7 +239,9 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2295"
-            endingLineNumber = "2295">
+            endingLineNumber = "2295"
+            landmarkName = "triggerImmediateCheck()"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -252,8 +256,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2285"
             endingLineNumber = "2285"
-            landmarkName = "WindowMover"
-            landmarkType = "3">
+            landmarkName = "requestAccessibilityPermission()"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
