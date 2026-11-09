@@ -68,6 +68,9 @@ class WindowMover: ObservableObject {
     private var moveAllAppsTask: Task<Void, Never>?
     // 启动期 true，期间 checkAndEnforcePinnedWindows 跳过 pinToScreen 防竞态
     private var isPerformingInitialMove: Bool = false
+    // AX 兜底滑动探测链的 per-pid 生成 ID——stopMonitoring 清除后，已入队 tick
+    // 通过 ID 校验自停止，避免 stop→start 快速切换时旧链误探测同 pid 新会话
+    private var axFallbackProbeIDs: [pid_t: UUID] = [:]
 
     // AXObserver: 借鉴 yabai 的事件驱动设计，替代双链轮询作为主检测路径
     // 按 pid 持有 AXObserver 实例；窗口创建通知到达后立即搬动，无需轮询
@@ -771,13 +774,18 @@ class WindowMover: ObservableObject {
     private func scheduleAXFallbackMove(pid: pid_t, targetFrame: CGRect, launchDate: Date? = nil) {
         let startedAt = Date()
         let timeout: TimeInterval = 1.5
+        // 生成链 ID：stopMonitoring 清除 axFallbackProbeIDs 后，已入队 tick 校验失败自停止
+        let probeID = UUID()
+        axFallbackProbeIDs[pid] = probeID
         // 首次立即探测（普通 App 窗口已出现则 t≈0 命中）；未出现则 40ms 间隔递归
-        probeAXFallbackTick(pid: pid, targetFrame: targetFrame, launchDate: launchDate, startedAt: startedAt, timeout: timeout)
+        probeAXFallbackTick(pid: pid, targetFrame: targetFrame, launchDate: launchDate, startedAt: startedAt, timeout: timeout, probeID: probeID)
     }
 
     /// 滑动探测单次 tick——窗口就绪即搬动；未就绪则 40ms 后继续，命中/超时/停止 三条件自停止
-    private func probeAXFallbackTick(pid: pid_t, targetFrame: CGRect, launchDate: Date?, startedAt: Date, timeout: TimeInterval) {
+    private func probeAXFallbackTick(pid: pid_t, targetFrame: CGRect, launchDate: Date?, startedAt: Date, timeout: TimeInterval, probeID: UUID) {
         guard isMonitoring else { return }
+        // 链 ID 校验：stopMonitoring 后该 pid 的链已失效（stop→start 新会话有新 ID）
+        guard axFallbackProbeIDs[pid] == probeID else { return }
         guard Date().timeIntervalSince(startedAt) < timeout else { return }
         // PID 复用防御——进程必须存在且 launchDate 与调度时刻一致
         guard let currentApp = NSRunningApplication(processIdentifier: pid) else { return }
@@ -791,7 +799,7 @@ class WindowMover: ObservableObject {
             // 窗口未就绪（微信类 AX 树未建）——40ms 后继续探测
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
                 guard let self = self else { return }
-                self.probeAXFallbackTick(pid: pid, targetFrame: targetFrame, launchDate: launchDate, startedAt: startedAt, timeout: timeout)
+                self.probeAXFallbackTick(pid: pid, targetFrame: targetFrame, launchDate: launchDate, startedAt: startedAt, timeout: timeout, probeID: probeID)
             }
             return
         }
@@ -1037,9 +1045,9 @@ class WindowMover: ObservableObject {
         let context = DetectionContext(pid: pid, targetFrame: targetFrame, launchDate: launchDate, titlePattern: titlePattern)
         activeDetections[pid] = context
 
-        // 链 A：CGWindowList 高频轮询（启动期 16ms 抢首帧，运行期保持 33ms 控 CPU）
-        // 16ms ≈ 60Hz 一帧——窗口对象一出现即检测，可见期压缩到帧级
-        startCGDetectionTimer(context: context, timeout: detectionTimeout, interval: 0.016)
+        // 链 A：CGWindowList 高频轮询（启动期 24ms≈40Hz 抢首帧，运行期保持 33ms 控 CPU）
+        // 24ms 相比 16ms 检测延迟仅增 8ms，但 CG 快照轮询 CPU 减半（多 App 并发启动不叠加过高）
+        startCGDetectionTimer(context: context, timeout: detectionTimeout, interval: 0.024)
         // 链 B：AX 100ms 兜底（无 Screen Recording 权限时仍能工作）
         startAXDetectionTimer(context: context, timeout: detectionTimeout)
     }
@@ -1524,6 +1532,8 @@ class WindowMover: ObservableObject {
         timer?.cancel()
         timer = nil
         isMonitoring = false
+        // 清除 AX 兜底探测链 ID——已入队 tick 校验失败自停止（即时取消语义）
+        axFallbackProbeIDs.removeAll()
         // 清移动/守卫/重试/兜底/超时冷却键
         // fsExit 保留：stopMonitoring 不清退出全屏冷却，
         // 避免 stop→start 3s 内全屏窗口重复触发退出动画
