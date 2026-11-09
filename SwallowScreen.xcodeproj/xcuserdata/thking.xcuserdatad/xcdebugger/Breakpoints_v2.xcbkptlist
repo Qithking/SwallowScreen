@@ -112,7 +112,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "326"
             endingLineNumber = "326"
-            landmarkName = "handleAXWindowCreated(pid:element:)"
+            landmarkName = "removeAXObserver(for:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -144,8 +144,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "411"
             endingLineNumber = "411"
-            landmarkName = "setupPinObserver(for:)"
-            landmarkType = "7">
+            landmarkName = "pinObserverCallback"
+            landmarkType = "24">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -176,7 +176,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "487"
             endingLineNumber = "487"
-            landmarkName = "handlePinWindowCreated(pid:element:)"
+            landmarkName = "startGlobalMouseUpMonitor()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -192,7 +192,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "488"
             endingLineNumber = "488"
-            landmarkName = "handlePinWindowCreated(pid:element:)"
+            landmarkName = "startGlobalMouseUpMonitor()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -208,8 +208,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "412"
             endingLineNumber = "412"
-            landmarkName = "setupPinObserver(for:)"
-            landmarkType = "7">
+            landmarkName = "pinObserverCallback"
+            landmarkType = "24">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -223,9 +223,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2289"
-            endingLineNumber = "2289"
-            landmarkName = "WindowMover"
-            landmarkType = "3">
+            endingLineNumber = "2289">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -239,9 +237,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2295"
-            endingLineNumber = "2295"
-            landmarkName = "triggerImmediateCheck()"
-            landmarkType = "7">
+            endingLineNumber = "2295">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -255,9 +251,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2285"
-            endingLineNumber = "2285"
-            landmarkName = "requestAccessibilityPermission()"
-            landmarkType = "7">
+            endingLineNumber = "2285">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy

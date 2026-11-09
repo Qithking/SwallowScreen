@@ -314,7 +314,7 @@ struct HotkeySettingsView: View {
     }
     
     private func startRecording() {
-        // 入口守门——recordingHotkey == nil 时绝不安装 monitor，避免竞态窗口
+        // recordingHotkey == nil 时绝不安装 monitor
         guard recordingHotkey != nil else { return }
 
         // HotkeySettingsView 是 struct，weak 不适用；
@@ -499,7 +499,7 @@ struct AboutView: View {
         .padding(.vertical, 16)
         .onAppear {
             loadCurrentVersion()
-            // 受 checkUpdateOnLaunch 控制，与 AppPopoverView.onAppear 守门一致
+            // 与 AppPopoverView.onAppear 一致：由 checkUpdateOnLaunch 控制
             if appSettings.first?.checkUpdateOnLaunch ?? true {
                 checkForUpdate()
             }
@@ -713,7 +713,7 @@ struct HotkeyCard: View {
         )
     }
     
-    // 键码表提为 static let，避免每次渲染都重建 70+ 条目的字典
+    // 键码表用 static let 缓存，避免每次渲染都重建 70+ 条目的字典
     private static let keyCodeNames: [UInt32: String] = [
             0x00: "A", 0x01: "S", 0x02: "D", 0x03: "F", 0x04: "H", 0x05: "G", 0x06: "Z", 0x07: "X",
             0x08: "C", 0x09: "V", 0x0B: "B", 0x0C: "Q", 0x0D: "W", 0x0E: "E", 0x0F: "R",

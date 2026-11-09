@@ -2,7 +2,7 @@
 //  CooldownRegistry.swift
 //  SwallowScreen
 //
-//  冷却/进行中守卫统一注册表：单一键控实现，收敛各类冷却/守卫/延迟任务状态
+//  集中管理各类冷却/守卫/延迟任务，按 key 区分
 //
 //  key 约定（调用方遵守）：
 //  - "move:<windowID>"   移动冷却（到期自动解除）

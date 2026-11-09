@@ -112,7 +112,7 @@ final class RelaunchManager {
             exit 1
         fi
 
-        # FIX-无回滚: 先复制到临时名，复制成功后再原子替换——
+        # 先复制到临时名，复制成功后再原子替换——
         # 避免 rm 后 cp 失败（磁盘满/权限）导致应用丢失且无法恢复
         rm -rf "\(targetAppPath).new" "\(targetAppPath).old"
         cp -R "$APP_PATH" "\(targetAppPath).new"
@@ -161,7 +161,7 @@ final class RelaunchManager {
             exit 1
         fi
 
-        # FIX-无回滚: 先复制到临时名，复制成功后再原子替换——
+        # 先复制到临时名，复制成功后再原子替换——
         # 避免 rm 后 cp 失败（磁盘满/权限）导致应用丢失且无法恢复
         rm -rf "\(targetAppPath).new" "\(targetAppPath).old"
         cp -R "$APP_PATH" "\(targetAppPath).new"

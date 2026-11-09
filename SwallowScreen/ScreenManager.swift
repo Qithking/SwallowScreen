@@ -56,7 +56,7 @@ class ScreenManager: ObservableObject {
         }
     }
 
-    /// 提供按 id/serialNumber/name 的统一查找接口
+    /// 提供按 id/serialNumber/name 的查找接口
     func screen(id: CGDirectDisplayID) -> ScreenInfo? {
         return screens.first { $0.id == id }
     }
@@ -73,15 +73,12 @@ class ScreenManager: ObservableObject {
         }) {
             return exact
         }
-        // 兼容旧版本：旧版存储的 targetScreenName 可能含分辨率后缀
-        //（如 "DELL U2720Q (2560x1440)"），故做前缀匹配——
-        // 检查 normalized 是否以某个 screen.name 开头
-        //（分辨率后缀格式为 " (WxH)"，空格+括号分隔）
+        // 兼容旧版本：targetScreenName 可能带分辨率后缀（如 "DELL U2720Q (2560x1440)"），
+        // 故做前缀匹配，剩余部分须以 "(" 或数字开头才命中
         for screen in screens {
             let screenName = screen.name.trimmingCharacters(in: .whitespacesAndNewlines)
             if !screenName.isEmpty && normalized.caseInsensitiveCompare(screenName) != .orderedSame
                 && normalized.hasPrefix(screenName) {
-                // 剩余部分应是分辨率后缀，格式 " (WxH)" 或 " WxH"
                 let suffix = normalized.dropFirst(screenName.count).trimmingCharacters(in: .whitespacesAndNewlines)
                 if suffix.hasPrefix("(") || suffix.first?.isNumber == true {
                     return screen
@@ -135,16 +132,14 @@ class ScreenManager: ObservableObject {
     func refreshScreens() {
         var screenList: [ScreenInfo] = []
 
-        // 使用 NSScreen 获取屏幕信息（更可靠）
+        // 使用 NSScreen 获取屏幕信息
         for (index, screen) in NSScreen.screens.enumerated() {
             let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? CGDirectDisplayID(index)
             let frame = screen.frame
             // 主屏幕判断：使用 CGDisplayIsMain API，与系统设置保持一致
             let isMain = (CGDisplayIsMain(screenID) != 0)
             let serialNumber = ScreenManager.serialNumber(for: screen)
-            
-            // name 仅存 localizedName（稳定，不随分辨率变化）；
-            // 分辨率后缀存到 resolutionSuffix（仅用于 UI 展示）
+
             var screenName = "屏幕 \(index + 1)"
             let name = screen.localizedName
             if !name.isEmpty {
@@ -171,13 +166,13 @@ class ScreenManager: ObservableObject {
             screenList.append(info)
         }
         
-        // 内容未变时不赋值，避免 @Published screens 空触发 SwiftUI 无效刷新
+        // 内容未变时不赋值，避免无谓触发 SwiftUI 刷新
         if screenList != screens {
             self.screens = screenList
         }
     }
     
-    /// 屏幕序列号统一入口
+    /// 屏幕序列号获取入口
     /// 格式优先级：SN:CGDisplaySerialNumber → VM:vendor-model → ID:displayID
     static func serialNumber(for screen: NSScreen) -> String? {
         guard let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,

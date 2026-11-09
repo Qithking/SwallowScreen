@@ -19,7 +19,7 @@ final class AppInfo {
 
     var targetScreenName: String?
 
-    // 屏幕序列号（用于唯一识别屏幕，跨系统重启仍然有效）
+    // 屏幕序列号（跨重启识别屏幕）
     var targetScreenSerialNumber: String?
 
     var isEnabled: Bool
@@ -27,7 +27,7 @@ final class AppInfo {
     // 是否固定屏幕 - 开启后应用只能在该屏幕移动，不允许移到其他屏幕
     var pinToScreen: Bool
 
-    // 窗口标题匹配模式（借鉴 yabai rule 系统）
+    // 窗口标题匹配模式
     // nil 或空字符串 = 匹配该应用所有窗口（默认行为）
     // 非空 = 仅匹配标题包含该字符串的窗口（大小写不敏感）
     // 示例："Settings" 仅匹配标题含 Settings 的窗口，其他窗口不受影响

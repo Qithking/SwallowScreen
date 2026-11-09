@@ -55,8 +55,7 @@ struct AppPopoverView: View {
         }
         .frame(width: 360, height: 500)
         .onAppear {
-            // AppManager 跨 popover 生命周期复用，需在每次打开时重置搜索状态，
-            // 否则上次搜索词/过滤结果残留
+            // AppManager 跨 popover 生命周期复用，每次打开时重置搜索状态
             if appManager.searchText != "" {
                 appManager.searchText = ""
             }
@@ -308,8 +307,7 @@ struct AppPopoverView: View {
                 return screen
             }
             // 3. 通过 name 匹配——走 screenManager.screen(name:) 统一入口，
-            //    内含旧版分辨率后缀兼容逻辑（如 "DELL U2720Q (2560x1440)"），
-            //    用 name 精确匹配会对旧版 targetScreenName 匹配失败
+            //    内含旧版分辨率后缀兼容逻辑（如 "DELL U2720Q (2560x1440)"）
             if let screenName = appInfo.targetScreenName {
                 return screenManager.screen(name: screenName)
             }
@@ -324,15 +322,13 @@ struct AppPopoverView: View {
                 screenName: screen?.name,
                 screenSerialNumber: screen?.serialNumber
             )
-            // 清空目标屏幕时同步关闭 pinToScreen——pin 需要目标屏幕才有意义，
-            // 否则 pinToScreen=true 但无目标屏幕是无效状态，pinObserver 不会创建但 UI 上 pin 仍亮着
-            // 必须在 isEnabled 逻辑之前执行，否则 isEnabled 不会正确关闭
+            // 清空目标屏幕时同步关闭 pinToScreen——无目标屏幕的 pin 是无效状态，
+            // 且必须先于下方 isEnabled 逻辑执行，否则 isEnabled 不会正确关闭
             if screen == nil && existingInfo.pinToScreen {
                 existingInfo.updatePinToScreen(false)
             }
-            // 选屏 ↔ isEnabled 双向同步——与 AppDelegate.setCurrentAppScreen/clearCurrentAppScreen 对齐：
-            // 选 nil 屏（"不指定"）= 无目标屏幕 = isEnabled=false，避免定时器空转
-            // 选非 nil 屏 = 有目标屏幕 = isEnabled=true，恢复屏幕规则
+            // 选屏 ↔ isEnabled 双向同步，与 AppDelegate.setCurrentAppScreen/clearCurrentAppScreen 对齐：
+            // 选 nil 屏 = 无目标屏幕 = isEnabled=false，避免定时器空转
             if screen != nil && !existingInfo.isEnabled {
                 existingInfo.isEnabled = true
             } else if screen == nil && existingInfo.isEnabled && !existingInfo.pinToScreen {
@@ -346,8 +342,7 @@ struct AppPopoverView: View {
                 targetScreenName: screen?.name,
                 targetScreenSerialNumber: screen?.serialNumber
             )
-            // 与 if 分支对齐——无目标屏幕时 isEnabled = false，
-            // 避免 isEnabled=true 但无目标屏幕的无效状态
+            // 与 if 分支对齐：无目标屏幕时 isEnabled = false
             if screen == nil {
                 newInfo.isEnabled = false
             }
@@ -462,8 +457,7 @@ struct AppPopoverView: View {
     }
     
     // 自动检查更新（启动时调用）
-    // 入口 isCheckingUpdate = true + 回调内 false，与 checkForUpdate 行为一致；
-    // 闭包不用 [weak self]——AppPopoverView 是 struct，按值捕获，无 retain cycle 风险
+    // AppPopoverView 是 struct，闭包按值捕获，无需 [weak self]
     private func autoCheckForUpdate() {
         guard !isCheckingUpdate else { return }
         isCheckingUpdate = true
@@ -527,11 +521,11 @@ struct AppRowView: View {
     let isMenuBarApp: Bool
     let onScreenSelected: (ScreenInfo?) -> Void
     let onPinToScreenChanged: (Bool) -> Void
-    // 图标按需懒加载入口；AppPopoverView 注入 AppManager.requestIcon 闭包
+    // 图标按需加载入口；AppPopoverView 注入 AppManager.requestIcon 闭包
     let onRequestIcon: ((@escaping @MainActor (NSImage?) -> Void) -> Void)?
 
     @State private var isHovering = false
-    @State private var displayIcon: NSImage? = nil  // 行级图标缓存，触发时更新
+    @State private var displayIcon: NSImage? = nil  // 行级图标缓存
 
     var body: some View {
         HStack(spacing: 8) {

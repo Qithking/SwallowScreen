@@ -10,13 +10,13 @@ import AppKit
 import os.log
 
 // MARK: - 下载窗口控制器
-/// 单例 + 复用窗口；多次下载只会有一个窗口，重复触发时聚焦已有窗口
+/// 单例 + 复用窗口，重复触发时聚焦已有窗口
 /// 显式 @MainActor，与 macOS 14+ NSWindowController 隔离保证一致
 @MainActor
 class DownloadWindowController: NSWindowController {
     static let shared = DownloadWindowController()
 
-    // 用于单例 init：先创建 nil 窗口，show(...) 时按需创建
+    // 单例 init 的初始窗口
     private static func makeWindow() -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 170),
@@ -195,7 +195,7 @@ struct DownloadWindowContentView: View {
         .padding(10)
         .frame(width: 380, height: 140)
         .background(
-            // 通过 Introspect 抓取宿主 NSWindow，存到 @State；关闭时直接 close 自己
+            // 抓取宿主 NSWindow 存到 @State，关闭时直接 close 自己
             GeometryReader { _ in
                 WindowAccessor { window in
                     if windowRef !== window {
@@ -217,9 +217,8 @@ struct DownloadWindowContentView: View {
         DownloadManager.shared.download(
             from: downloadURL,
             urlKey: downloadURL.absoluteString,
-            // DownloadWindowContentView 是 struct（SwiftUI View），[weak self] 不适用，
-            // 按值捕获也无 retain cycle 风险
-            // delegate 回调已通过 Task @MainActor 派发回主线程，无需再二次派发
+            // struct 按值捕获，无需 [weak self]
+            // 回调已通过 Task @MainActor 派发回主线程
             onProgress: { progress in
                 self.downloadProgress = progress
             },
@@ -235,8 +234,7 @@ struct DownloadWindowContentView: View {
     }
 
     private func cancelDownload() {
-        // 标记为 failed——cancel() 后的时间窗口内 onError 仍可能被派发，
-        // 防止异步回调再修改 UI 状态
+        // 先标 failed：cancel() 后 onError 仍可能被派发，防止异步回调再改 UI 状态
         downloadStatus = .failed
         DownloadManager.shared.cancel(urlKey: downloadURL.absoluteString)
         closeWindow()
@@ -296,9 +294,8 @@ private struct WindowAccessor: NSViewRepresentable {
 
 // MARK: - 下载管理器
 // 按 URL 串行化：同 URL 多次下载会取消旧 task
-// @MainActor 保证 activeTasks/callbacks 读写串行化——delegateQueue: .main 不保证所有
-// delegate 回调在主线程，assert 在 Release 中被移除无法保护；
-// delegate 方法标 nonisolated + MainActor.run 派发，解决 Swift 6 strict concurrency
+// @MainActor 保证状态读写串行化；delegate 方法标 nonisolated + MainActor.run 派发，
+// 解决 Swift 6 strict concurrency 下与 URLSession 后台回调的冲突
 @MainActor
 class DownloadManager: NSObject, URLSessionDownloadDelegate {
     static let shared = DownloadManager()
@@ -356,8 +353,8 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     // MARK: - URLSessionDownloadDelegate
-    // R-220: 全部标 nonisolated，内部用 MainActor.run 派发回主线程——
-    //        解决 @MainActor conformance 与 URLSession 后台回调的冲突
+    // 全部标 nonisolated，内部用 MainActor.run 派发回主线程，
+    // 解决 @MainActor conformance 与 URLSession 后台回调的冲突
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let urlKey = downloadTask.taskDescription else { return }
@@ -380,7 +377,7 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
 
         try? fileManager.removeItem(at: destinationURL)
 
-        // 移到后台线程执行 fileManager.copyItem——>100MB 文件不再阻塞主线程
+        // 后台线程执行 copyItem，避免大文件阻塞主线程
         let locationCopy = location
         let urlKeyCapture = urlKey
         Task.detached(priority: .utility) {
@@ -392,8 +389,8 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
                         try? FileManager.default.removeItem(at: file)
                     }
                 }
-                // 集中到同一个 MainActor.run：onComplete 与 callbacks/activeTasks 清理原子完成，
-                // 避免与 didCompleteWithError 的清理产生数据竞态
+                // 集中在同一个 MainActor.run：onComplete 与 callbacks/activeTasks 清理一起完成，
+                // 避免与 didCompleteWithError 的清理互相冲突
                 await MainActor.run { [weak self] in
                     self?.callbacks[urlKeyCapture]?.onComplete(destinationURL)
                     self?.callbacks[urlKeyCapture] = nil

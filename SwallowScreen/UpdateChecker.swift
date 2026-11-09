@@ -2,13 +2,12 @@
 //  UpdateChecker.swift
 //  SwallowScreen
 //
-//  统一的 GitHub Releases 更新检查工具（被 AppPopoverView 与 SettingsView.AboutView 共用）
+//  GitHub Releases 更新检查工具（AppPopoverView 与 SettingsView.AboutView 共用）
 //
 
 import Foundation
 
-/// 把"拉取 GitHub Releases latest → 比较版本 → 返回结果"统一到一个工具类，
-/// 调用方只需关心结果，不需重复实现 URLSession + JSONSerialization 逻辑。
+/// 拉取 GitHub Releases latest → 比较版本 → 返回结果，调用方无需重复实现 URLSession 逻辑。
 final class UpdateChecker {
 
     struct UpdateInfo: Equatable {

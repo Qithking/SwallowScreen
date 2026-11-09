@@ -78,7 +78,7 @@ class AppManager: ObservableObject {
             uniqueApps[app.bundleIdentifier] = app
         }
 
-        // icon 按需懒加载（AppRowView.onAppear 触发），避免一次性加载全部图标常驻内存
+        // icon 按需加载（AppRowView.onAppear 触发），避免一次性加载全部图标常驻内存
         // localizedStandardCompare：系统标准排序规则，且避免重复构造 Locale
         let basicApps = Array(uniqueApps.values).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         self.installedApps = basicApps

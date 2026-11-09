@@ -2,9 +2,8 @@
 //  AXWindowReader.swift
 //  SwallowScreen
 //
-//  AX 属性读取统一入口。
-//  统一语义：调用成功且值类型匹配才返回解包值，否则返回 nil
-//  （.success 但值类型不符时返回 nil，而非强转崩溃）。
+//  AX 属性读取入口。
+//  约定：调用成功且值类型匹配才返回解包值，否则返回 nil（类型不符不强转，避免崩溃）。
 //
 
 import AppKit

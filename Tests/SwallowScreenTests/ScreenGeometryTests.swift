@@ -62,7 +62,7 @@ final class ScreenGeometryTests: XCTestCase {
         XCTAssertEqual(ScreenGeometry.windowOverlapRatio(bounds, targetFrame: target), 0)
     }
 
-    // 零面积窗口 → 0（除零防御）
+    // 零面积窗口 → 0（避免除零）
     func testOverlapRatioZeroAreaBounds() {
         XCTAssertEqual(ScreenGeometry.windowOverlapRatio(.zero, targetFrame: CGRect(x: 0, y: 0, width: 100, height: 100)), 0)
     }

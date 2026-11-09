@@ -19,9 +19,7 @@ enum UpdateChannel: String, CaseIterable {
     private static let proxyPrefix = "https://gh-proxy.com/"
 
     /// 按渠道解析下载地址
-    /// - github: 任意 URL 原样返回
-    /// - ghproxy: 仅对 github.com 域名加前缀；其余域名（含已带前缀的
-    ///   gh-proxy.com URL，天然幂等）原样返回
+    /// - github: 原样返回；ghproxy: 仅对 github.com 域名加前缀，其余（含已带前缀的 URL）原样返回
     func resolveDownloadURL(_ urlString: String) -> String {
         guard self == .ghproxy,
               let url = URL(string: urlString),

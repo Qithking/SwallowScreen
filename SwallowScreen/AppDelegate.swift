@@ -25,8 +25,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var pinToScreenObserverToken: Any?
     private var appearanceObserverToken: Any?
 
-    // AppManager/ScreenManager 由 AppDelegate 持有：避免每次 popover 重建时
-    // 重新扫描应用目录、重建图标缓存（峰值 +2-4MB 内存抖动）
+    // AppManager/ScreenManager 由 AppDelegate 持有，避免每次 popover 重建时重新扫描目录、重建图标缓存（峰值 +2-4MB 内存抖动）
     let appManager = AppManager()
     let screenManager = ScreenManager()
     
@@ -274,7 +273,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if AXIsProcessTrusted() {
                 timer.cancel()
                 self.permissionCheckTimer = nil
-                // stop + setup 同步执行，避免异步 stop 与同步 setup 顺序竞争
+                // 同步先 stop 再 setup，保证执行顺序
                 self.windowMover?.stopMonitoring()
                 self.setupWindowMover()
                 return
@@ -380,7 +379,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             os_log("InstallEventHandler failed: status=%d", log: OSLog.default, type: .error, Int(installStatus))
             hotKeyHandlerRef = nil
         }
-        // 持有 handlerRef 引用，applicationWillTerminate 中释放
         hotKeyHandlerRef = handlerRef
     }
 
@@ -410,7 +408,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let mouseLocation = NSEvent.mouseLocation
         var targetScreen: NSScreen?
 
-        // 用 visibleFrame 匹配，与 ScreenManager.screen(containing:) 统一坐标语义
+        // 用 visibleFrame 匹配，与 ScreenManager.screen(containing:) 保持一致
         for screen in NSScreen.screens {
             if screen.visibleFrame.contains(mouseLocation) {
                 targetScreen = screen
@@ -445,7 +443,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             var titlePattern: String? = nil
             if let existing = existing {
                 existing.updateScreen(screenID: screenID, screenName: screen.localizedName, screenSerialNumber: screenSerialNumber)
-                // 用户主动 set 屏 = 重新启用屏幕规则，与 updatePinToScreen 的启用逻辑对齐
+                // 用户主动 set 屏时重新启用屏幕规则（与 updatePinToScreen 的启用逻辑一致）
                 existing.isEnabled = true
                 titlePattern = existing.windowTitlePattern
             } else {
