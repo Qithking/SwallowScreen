@@ -21,13 +21,13 @@ let package = Package(
         .target(
             name: "SwallowScreenCore",
             path: "SwallowScreen",
-            sources: ["UpdateChannel.swift"]
+            sources: ["UpdateChannel.swift", "ScreenGeometry.swift"]
         ),
         .executableTarget(
             name: "SwallowScreen",
             dependencies: ["SwallowScreenCore"],
             path: "SwallowScreen",
-            exclude: ["Assets.xcassets", "UpdateChannel.swift"],
+            exclude: ["Assets.xcassets", "UpdateChannel.swift", "ScreenGeometry.swift"],
             resources: [
                 .process("Assets.xcassets")
             ]

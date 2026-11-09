@@ -276,7 +276,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         guard let container = modelContainer else { return }
 
-        windowMover = WindowMover()
+        windowMover = WindowMover(screenManager: screenManager)
         windowMover?.configure(modelContext: container.mainContext)
 
         if windowMover?.startMonitoring() == true {

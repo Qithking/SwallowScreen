@@ -11,6 +11,10 @@ import CoreGraphics
 import SwiftData
 import Combine
 import os  // P2: Logger（懒插值）— 热路径日志优化（已全量替换 os_log）
+// SPM 构建下 ScreenGeometry 位于 SwallowScreenCore 模块；Xcode 工程为平面 target 无需 import
+#if canImport(SwallowScreenCore)
+import SwallowScreenCore
+#endif
 
 @MainActor
 class WindowMover: ObservableObject {
@@ -23,7 +27,6 @@ class WindowMover: ObservableObject {
     private var timer: DispatchSourceTimer?
     private var modelContext: ModelContext?
     private var checkInterval: TimeInterval = 0.1  // 固定屏幕检查间隔（100ms，平衡响应速度与 CPU）
-    private var lastMovedWindows: Set<String> = [] // 冷却中的窗口
 
     // P2: 统一 Logger 实例——热路径日志懒插值（debug 级别不构造消息字符串）
     private let logger = Logger(subsystem: "com.swallowscreen.SwallowScreen", category: "WindowMover")
@@ -32,7 +35,10 @@ class WindowMover: ObservableObject {
     private var previousWindowPositionsOrder: [String] = []
     // R-151: 配套的 Set，contains 走 O(1)——替代 Array.contains O(n) 性能问题
     private var previousWindowPositionsOrderSet: Set<String> = []
-    private var movingWindows: Set<String> = [] // 正在移动的窗口
+    // D2: 冷却/守卫统一注册表——收敛原 lastMovedWindows+cooldownWorkItems、movingWindows、
+    //     fullscreenExitAttempts、axFallbackWorkItems、axObserverTimeoutItems 六处变体
+    //     key 约定见 CooldownRegistry.swift 头注释
+    private let cooldowns = CooldownRegistry()
     // C2: AX 元数据缓存（title/role/size）——按位置 50px 网格分桶
     //     同一窗口静止时复用，AX 系统调用 ↓ ~75%
     //     与 previousWindowPositions 协同：后者管"位置是否变化"，本字典管"title/role/size 是否需要重读"
@@ -40,15 +46,13 @@ class WindowMover: ObservableObject {
 
     // 观察者 token，用于 deinit 时清理
     private var appLaunchObserverToken: NSObjectProtocol?
-    // C3: 屏变化观察者 token——屏变化时使 getCurrentScreenMappings 缓存失效
+    // C3: 屏变化观察者 token——屏变化时清理 pin 侧缓存并刷新 observers
     private var screenChangeObserverToken: NSObjectProtocol?
     // P1: App 终止观察者 token——App 退出时清理其相关字典键
     private var appTerminationObserverToken: NSObjectProtocol?
     // Space 感知：监听 Space 切换，触发即时 pinToScreen 检查
     // 借鉴 yabai：Space 切换后立即检查新 Space 上的 pinned 窗口位置
     private var spaceChangeObserverToken: NSObjectProtocol?
-    // 冷却清理用的 DispatchWorkItem 缓存，便于 deinit 一并取消
-    private var cooldownWorkItems: [String: DispatchWorkItem] = [:]
     // T18: AppInfo 列表指纹，用于"配置未变则跳过"
     private var lastAppsFingerprint: Int = 0
     // 缓存 pinned AppInfo 列表——指纹未变时复用，避免每 100ms 都 SwiftData fetch
@@ -92,7 +96,7 @@ class WindowMover: ObservableObject {
 
     // FIX-响应慢: pinObserver 快速路径缓存——pid → (targetFrame, screenID)
     // 窗口移动事件到达时直接查缓存，跳过 SwiftData fetch + runningApplications 遍历
-    // 在 refreshPinObservers / invalidateScreenCache 时同步更新
+    // 在 refreshPinObservers / handleScreenConfigurationChanged 时同步更新
     private var pinTargetCache: [pid_t: (frame: CGRect, visibleFrame: CGRect, screenID: UInt32)] = [:]
 
     // FIX-响应慢: 缓存 pid → 主窗口 AXUIElement 引用，避免每次 kAXWindowsAttribute 查询（~5-15ms）
@@ -101,9 +105,6 @@ class WindowMover: ObservableObject {
     // FIX-#5: 附带缓存时间戳——窗口 resize 后陈旧尺寸会导致 isBoundsInTargetFrame
     //         中心点误判与搬动 prebuiltSize 错误，超过 TTL 强制重读刷新
     private var pinWindowSizeCache: [pid_t: (size: CGSize, cachedAt: Date)] = [:]
-    /// FIX-问题23: 记录每 pid 最近一次触发退出全屏的时间——退出全屏动画约 0.5-1s，
-    /// 期间 100ms 轮询会反复命中全屏分支，3s 冷却内不重复触发
-    private var fullscreenExitAttempts: [pid_t: Date] = [:]
     /// FIX-#5: pinWindowSizeCache 过期时长
     private static let pinWindowSizeCacheTTL: TimeInterval = 5.0
 
@@ -111,12 +112,12 @@ class WindowMover: ObservableObject {
     // 鼠标按下时记录 pid，等全局 leftMouseUp 事件触发后立即回弹
     private var pendingDragCheckPids: Set<pid_t> = []
     private var globalMouseUpMonitor: Any? = nil
-    // RT160: scheduleAXFallbackMove 的延迟 workItems，stopMonitoring 时可取消
-    private var axFallbackWorkItems: [DispatchWorkItem] = []
-    // FIX-#4: AXObserver 空闲超时 workItems——标题永不匹配时防止 observer 永久挂起
-    private var axObserverTimeoutItems: [pid_t: DispatchWorkItem] = [:]
+    // D3: 屏幕信息/目标屏解析统一走 ScreenManager（原本地 ScreenInfo/getCurrentScreenMappings/
+    //     resolveTargetFrame 并行实现已删除）
+    private let screenManager: ScreenManager
 
-    init() {
+    init(screenManager: ScreenManager) {
+        self.screenManager = screenManager
         _ = checkAccessibilityPermission()
         // FIX-启动不搬窗: NSWorkspace.didLaunchApplicationNotification 监听改到 startMonitoring 中注册，
         //   避免 AppDelegate 延迟 1s 创建 WindowMover 期间丢失应用启动通知
@@ -173,14 +174,12 @@ class WindowMover: ObservableObject {
             globalMouseUpMonitor = nil
         }
         for context in activeDetections.values { context.cancel() }
-        for item in cooldownWorkItems.values { item.cancel() }
-        // RT160: 取消 AX 兜底延迟任务
-        for item in axFallbackWorkItems { item.cancel() }
-        // FIX-#4: 取消 AXObserver 空闲超时任务
-        for item in axObserverTimeoutItems.values { item.cancel() }
+        // D2: 全部冷却/延迟任务经统一注册表取消
+        cooldowns.cancelAll()
     }
 
-    /// C3: 监听 .screenConfigurationChanged 屏变化事件——失效屏幕缓存
+    /// C3: 监听 .screenConfigurationChanged 屏变化事件——重建 pin 快取并刷新 observers
+    /// （D3: 屏幕列表缓存已随并行实现删除，ScreenManager 自行维护 screens 刷新）
     private func setupScreenChangeObserver() {
         screenChangeObserverToken = NotificationCenter.default.addObserver(
             forName: .screenConfigurationChanged,
@@ -188,7 +187,7 @@ class WindowMover: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             guard let self = self else { return }
-            self.invalidateScreenCache()
+            self.handleScreenConfigurationChanged()
         }
     }
 
@@ -358,24 +357,19 @@ class WindowMover: ObservableObject {
 
     /// FIX-#4: 调度（或刷新）观察者空闲超时计时
     private func scheduleAXObserverTimeout(for pid: pid_t) {
-        axObserverTimeoutItems[pid]?.cancel()
-        let item = DispatchWorkItem { [weak self] in
+        cooldowns.coolDown("axTimeout:\(pid)", duration: Self.axObserverIdleTimeout) { [weak self] in
             guard let self = self else { return }
-            self.axObserverTimeoutItems.removeValue(forKey: pid)
             // observation 已不存在 = 已命中清理或 App 已退出，无需处理
             guard self.pendingAXObservations[pid] != nil else { return }
             self.logger.info("AXObserver 空闲超时，清理观察者: pid=\(pid, privacy: .public)")
             self.removeAXObserver(for: pid)
             self.pendingAXObservations.removeValue(forKey: pid)
         }
-        axObserverTimeoutItems[pid] = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.axObserverIdleTimeout, execute: item)
     }
 
     /// FIX-#4: 取消观察者空闲超时计时（observer 正常命中移除时调用）
     private func cancelAXObserverTimeout(for pid: pid_t) {
-        axObserverTimeoutItems[pid]?.cancel()
-        axObserverTimeoutItems.removeValue(forKey: pid)
+        cooldowns.cancel("axTimeout:\(pid)")
     }
 
     // MARK: - pinToScreen 窗口移动事件驱动
@@ -460,7 +454,7 @@ class WindowMover: ObservableObject {
 
         let windowID = "\(pid)-main"
         // 正在系统移动中时跳过
-        guard !movingWindows.contains(windowID) else { return }
+        guard !cooldowns.isCoolingDown("moving:\(windowID)") else { return }
 
         // FIX-拖拽检测: 检测鼠标左键是否按下
         let isDragging = isMouseLeftButtonDown()
@@ -495,17 +489,8 @@ class WindowMover: ObservableObject {
         guard let cached = pinTargetCache[pid] else { return }
 
         // 读取新窗口位置 + 尺寸（可读 = 窗口存活且就绪）
-        var positionValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue) == .success,
-              let posVal = positionValue else { return }
-        var position = CGPoint.zero
-        AXValueGetValue(posVal as! AXValue, .cgPoint, &position)
-
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              let sizeVal = sizeValue else { return }
-        var size = CGSize.zero
-        AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+        guard let position = AXWindowReader.position(element),
+              let size = AXWindowReader.size(element) else { return }
 
         // 过滤瞬时/辅助窗口（与 CGWindowList 路径的 ≥50 尺寸过滤一致）
         guard size.width >= 50, size.height >= 50 else { return }
@@ -516,10 +501,11 @@ class WindowMover: ObservableObject {
 
         // 防循环：该窗口标识正在搬动/冷却中时跳过（独立于主窗口的 "\(pid)-main" key）
         let windowID = "\(pid)-created"
-        guard !movingWindows.contains(windowID), !lastMovedWindows.contains(windowID) else { return }
+        guard !cooldowns.isCoolingDown("moving:\(windowID)"),
+              !cooldowns.isCoolingDown("move:\(windowID)") else { return }
 
         // 搬动到固定屏幕（moveWindowToTargetScreen 内部 = hideMoveUnhide + 冷却 + 延迟验证）
-        movingWindows.insert(windowID)
+        cooldowns.hold("moving:\(windowID)")
         moveWindowToTargetScreen(element, screenFrame: cached.frame, visibleFrame: cached.visibleFrame, windowID: windowID, prebuiltSize: size)
     }
 
@@ -569,7 +555,7 @@ class WindowMover: ObservableObject {
     private func performPinCheck(pid: pid_t) {
         let windowID = "\(pid)-main"
         // 冷却期检查——刚被系统移动过的窗口，短时间内不再移动
-        guard !lastMovedWindows.contains(windowID) else { return }
+        guard !cooldowns.isCoolingDown("move:\(windowID)") else { return }
 
         // 快速路径——直接查 pinTargetCache
         if let cached = pinTargetCache[pid] {
@@ -595,8 +581,8 @@ class WindowMover: ObservableObject {
         )
         guard let appInfo = try? modelContext.fetch(descriptor).first else { return }
 
-        let currentScreens = getCurrentScreenMappings()
-        guard let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) else { return }
+        // D3: 目标屏解析统一走 ScreenManager.resolveTarget
+        guard let resolved = screenManager.resolveTarget(for: appInfo) else { return }
 
         // FIX-响应慢: 只查单个 pid 的窗口，不扫描全部
         checkWindowPosition(pid: pid, screenFrame: resolved.frame, targetFrame: resolved.visibleFrame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id)
@@ -624,7 +610,7 @@ class WindowMover: ObservableObject {
         // FIX-问题12回归: 同步清理 created 快照截止时间，避免残留过期窗口误吞真·新窗口通知
         createdSnapshotCutoff.removeValue(forKey: pid)
         // FIX-问题23: 同步清理退出全屏冷却记录，避免同 pid 新实例继承过期时间戳
-        fullscreenExitAttempts.removeValue(forKey: pid)
+        cooldowns.cancel("fsExit:\(pid)")
         pendingDragCheckPids.remove(pid)
         // FIX: 如果没有待检查的拖拽窗口了，清理全局鼠标松开监听
         if pendingDragCheckPids.isEmpty, let monitor = globalMouseUpMonitor {
@@ -654,8 +640,6 @@ class WindowMover: ObservableObject {
             }
         }
 
-        let currentScreens = getCurrentScreenMappings()
-
         // 需要监听的 pid 集合 + 构建 pinTargetCache
         var desiredPids: Set<pid_t> = []
         var newPinTargetCache: [pid_t: (frame: CGRect, visibleFrame: CGRect, screenID: UInt32)] = [:]
@@ -664,8 +648,8 @@ class WindowMover: ObservableObject {
                let pid = bundleIDToPid[appInfo.bundleIdentifier] {
                 desiredPids.insert(pid)
                 setupPinObserver(for: pid)
-                // FIX-响应慢: 预计算 targetFrame 并缓存
-                if let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) {
+                // FIX-响应慢: 预计算 targetFrame 并缓存（D3: 统一走 ScreenManager.resolveTarget）
+                if let resolved = screenManager.resolveTarget(for: appInfo) {
                     newPinTargetCache[pid] = (resolved.frame, resolved.visibleFrame, resolved.id)
                 }
             }
@@ -682,7 +666,7 @@ class WindowMover: ObservableObject {
     /// P1: 监听 App 退出事件——及时清理该 App 的字典残留键
     /// 之前：仅依赖 timer tick 内 `isPIDStillOriginal()` 校验退出
     ///       在两次 tick 之间 App 退出且 tick 被 cancel 时 context 残留
-    ///       `lastMovedWindows` / `movingWindows` / `previousWindowPositions` 留死键
+    ///       冷却注册表 `move:` / `moving:` / `previousWindowPositions` 留死键
     /// 现在：didTerminateApplicationNotification 立即清理所有与该 pid 相关的状态
     private func setupAppTerminationObserver() {
         appTerminationObserverToken = NSWorkspace.shared.notificationCenter.addObserver(
@@ -720,13 +704,11 @@ class WindowMover: ObservableObject {
                 self.previousWindowPositionsOrder.removeAll { $0 == key }
                 self.previousWindowPositionsOrderSet.remove(key)
             }
-            // movingWindows / lastMovedWindows / cooldownWorkItems 同理
-            self.movingWindows = self.movingWindows.filter { !$0.hasPrefix(pidPrefix) }
-            self.lastMovedWindows = self.lastMovedWindows.filter { !$0.hasPrefix(pidPrefix) }
-            let cooldownKeysToRemove = self.cooldownWorkItems.keys.filter { $0.hasPrefix(pidPrefix) }
-            for key in cooldownKeysToRemove {
-                self.cooldownWorkItems[key]?.cancel()
-                self.cooldownWorkItems.removeValue(forKey: key)
+            // D2: moving/move/unhide 冷却键按 pid 前缀清理（原三套字典合并为 registry）
+            //     "move:"/"moving:" 键带命名空间前缀，需显式匹配，裸 pidPrefix 兜底；
+            //     unhide: 按窗口指针命名，与原实现一致不参与 pid 清理
+            self.cooldowns.removeKeys { key in
+                key.hasPrefix("move:\(pidPrefix)") || key.hasPrefix("moving:\(pidPrefix)") || key.hasPrefix(pidPrefix)
             }
         }
     }
@@ -780,11 +762,8 @@ class WindowMover: ObservableObject {
             || appInfo.targetScreenName != nil
         guard appInfo.pinToScreen || hasTarget else { return }
 
-        // 获取当前屏幕信息
-        let currentScreens = getCurrentScreenMappings()
-
-        // RT69: 抽 resolveTargetFrame helper
-        guard let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) else {
+        // D3: 目标屏解析统一走 ScreenManager.resolveTarget
+        guard let resolved = screenManager.resolveTarget(for: appInfo) else {
             // RT31: 配置的屏幕全部匹配失败时输出日志，便于定位"配置屏幕已拔掉"
             // P2: 改用 Logger——自动避免未启用级别下的字符串构造
             logger.error("未找到 App 配置的目标屏幕: bundleID=\(bundleIdentifier, privacy: .public) targetScreenID=\(String(describing: appInfo.targetScreenID), privacy: .public) targetScreenSerialNumber=\(appInfo.targetScreenSerialNumber ?? "<nil>", privacy: .public) targetScreenName=\(appInfo.targetScreenName ?? "<nil>", privacy: .public)")
@@ -811,19 +790,14 @@ class WindowMover: ObservableObject {
 
     /// FIX-启动不搬窗: 应用启动后的延迟 AX 兜底搬窗
     /// 不依赖 kAXWindowCreatedNotification 和 CGWindowList，而是定时直接用 AX 读取窗口并检查位置
-    /// RT160: workItems 保存到 axFallbackWorkItems，stopMonitoring 时可取消
+    /// RT160: 延迟任务登记到 cooldowns（key "axFallback:..."），stopMonitoring 统一取消
     /// FIX-#6: 记录调度时刻的 launchDate，fire 时校验 PID 未被复用（与 onWindowDetected
     ///         的 isPIDStillOriginal 防御对称），防止旧 App 退出后新 App 误中旧 targetFrame
-    /// FIX-#3: workItem 执行完成后从 axFallbackWorkItems 自清理，防止数组无界累积
+    /// FIX-#3: workItem 执行完成后由 CooldownRegistry 自动移除条目，防止无界累积
     private func scheduleAXFallbackMove(pid: pid_t, targetFrame: CGRect, delays: [TimeInterval], launchDate: Date? = nil) {
         for delay in delays {
-            // weakItem 弱引用自身用于执行后自清理——item 持闭包、闭包只弱持 item，无循环
-            var weakItem: DispatchWorkItem?
-            let item = DispatchWorkItem { [weak self] in
-                defer {
-                    // FIX-#3: 无论命中/跳过/提前 return，执行完成即从数组移除
-                    if let it = weakItem { self?.axFallbackWorkItems.removeAll { $0 === it } }
-                }
+            let key = "axFallback:\(pid):\(UUID().uuidString)"
+            cooldowns.coolDown(key, duration: delay) { [weak self] in
                 guard let self = self else { return }
                 // FIX-#6: PID 复用防御——进程必须存在且 launchDate 与调度时刻一致
                 guard let currentApp = NSRunningApplication(processIdentifier: pid) else { return }
@@ -831,10 +805,7 @@ class WindowMover: ObservableObject {
                     logger.info("AX 兜底: PID 已被复用，跳过搬窗 pid=\(pid, privacy: .public)")
                     return
                 }
-                let appElement = AXUIElementCreateApplication(pid)
-                var windowsValue: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
-                      let axWindows = windowsValue as? [AXUIElement], !axWindows.isEmpty else {
+                guard let axWindows = AXWindowReader.windows(pid: pid), !axWindows.isEmpty else {
                     logger.info("AX 兜底: 未获取到窗口 pid=\(pid, privacy: .public)")
                     return
                 }
@@ -842,17 +813,9 @@ class WindowMover: ObservableObject {
                     logger.info("AX 兜底: 挑不出主窗口 pid=\(pid, privacy: .public)")
                     return
                 }
-                var positionValue: CFTypeRef?
-                var sizeValue: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(mainWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
-                      AXUIElementCopyAttributeValue(mainWindow, kAXSizeAttribute as CFString, &sizeValue) == .success else {
+                guard let currentBounds = AXWindowReader.bounds(mainWindow) else {
                     return
                 }
-                var currentPosition = CGPoint.zero
-                var currentSize = CGSize.zero
-                AXValueGetValue(positionValue as! AXValue, .cgPoint, &currentPosition)
-                AXValueGetValue(sizeValue as! AXValue, .cgSize, &currentSize)
-                let currentBounds = CGRect(origin: currentPosition, size: currentSize)
                 if self.isBoundsInTargetFrame(currentBounds, targetFrame: targetFrame) {
                     logger.info("AX 兜底: 窗口已在目标屏幕 pid=\(pid, privacy: .public)")
                     return
@@ -863,8 +826,6 @@ class WindowMover: ObservableObject {
                     self?.startStabilityCheck(pid: pid, targetFrame: targetFrame)
                 }
             }
-            axFallbackWorkItems.append(item)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
         }
     }
     
@@ -884,7 +845,7 @@ class WindowMover: ObservableObject {
     /// FIX-启动不搬窗: 对不支持 hidden 属性的 App（如微信），hidden 设置失败后直接走 move-only 路径
     private func hideMoveUnhide(axWindows: [AXUIElement], targetFrame: CGRect, prebuiltSize: CGSize? = nil) {
         // 1) 仅对"还活着"的窗口走 hide 路径，已销毁的窗口直接跳过
-        let alive: [AXUIElement] = axWindows.filter { isAXWindowAlive($0) }
+        let alive: [AXUIElement] = axWindows.filter { AXWindowReader.isAlive($0) }
 
         // FIX-启动不搬窗: 记录 hidden 设置是否成功，失败的窗口直接 move 不尝试 unhide
         var hiddenSucceeded: [AXUIElement: Bool] = [:]
@@ -906,17 +867,10 @@ class WindowMover: ObservableObject {
             guard hiddenSucceeded[window] == true else { continue }
             if !setAXWindowHidden(window, hidden: false) {
                 let key = cooldownKey(axWindow: window)
-                cooldownWorkItems[key]?.cancel()
-                let workItem = DispatchWorkItem { [weak self] in
-                    guard let self = self, self.isAXWindowAlive(window) else {
-                        self?.cooldownWorkItems.removeValue(forKey: key)
-                        return
-                    }
+                cooldowns.coolDown(key, duration: 0.1) { [weak self] in
+                    guard let self = self, AXWindowReader.isAlive(window) else { return }
                     self.setAXWindowHidden(window, hidden: false)
-                    self.cooldownWorkItems.removeValue(forKey: key)
                 }
-                cooldownWorkItems[key] = workItem
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: workItem)
             }
         }
 
@@ -927,12 +881,8 @@ class WindowMover: ObservableObject {
             guard let self = self else { return }
             let visibleTL = self.visibleFrameToTL(targetFrame)
             for window in alive {
-                guard self.isAXWindowAlive(window) else { continue }
-                var posValue: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
-                      let posVal = posValue else { continue }
-                var actualPos = CGPoint.zero
-                AXValueGetValue(posVal as! AXValue, .cgPoint, &actualPos)
+                guard AXWindowReader.isAlive(window) else { continue }
+                guard let actualPos = AXWindowReader.position(window) else { continue }
 
                 // 用 visibleFrame 重新计算期望位置（与 moveWindowToFrameImmediate 一致）
                 let winSize = self.readWindowSizeFromAX(window, fallback: prebuiltSize)
@@ -951,9 +901,9 @@ class WindowMover: ObservableObject {
         }
     }
 
-    /// RT5: 统一生成 cooldownWorkItems 的 key
-    /// - 用 windowID: 移动冷却
-    /// - 用 AXUIElement pointer: unhide retry 冷却
+    /// RT5: 统一生成冷却注册表的 key
+    /// - 用 windowID: 移动冷却（"move:"）
+    /// - 用 AXUIElement pointer: unhide retry 冷却（"unhide:"）
     /// R-129: 改用 Unmanaged opaque pointer 作为 key——AXUIElement 生命周期内稳定，
     ///        释放后被新对象复用理论风险，注释说明
     private func cooldownKey(windowID: String? = nil, axWindow: AXUIElement? = nil) -> String {
@@ -964,13 +914,6 @@ class WindowMover: ObservableObject {
             return "unhide:\(ptr)"
         }
         return "unknown"
-    }
-
-    /// 校验 AX 窗口仍可访问（位置属性可读即为"活着"）。
-    /// 用于 hide 之前避免对刚被销毁的窗口调用无意义的 setter。
-    private func isAXWindowAlive(_ window: AXUIElement) -> Bool {
-        var posVal: CFTypeRef?
-        return AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posVal) == .success
     }
 
     /// 通过 CGWindowList 查找指定 PID 的第一个"普通 on-screen"窗口 bounds
@@ -1079,32 +1022,13 @@ class WindowMover: ObservableObject {
     /// 在 AX 窗口列表中按 (position, size) 容差匹配，拿到与 CGWindowList 同一窗口对应的 AXUIElement
     /// 容差 1.0 像素，覆盖浮点精度问题
     private func matchAXWindow(for pid: pid_t, targetBounds: CGRect) -> AXUIElement? {
-        let appElement = AXUIElementCreateApplication(pid)
-        var windowsValue: CFTypeRef?
-
-        let result = AXUIElementCopyAttributeValue(
-            appElement,
-            kAXWindowsAttribute as CFString,
-            &windowsValue
-        )
-
-        guard result == .success, let windows = windowsValue as? [AXUIElement] else {
+        guard let windows = AXWindowReader.windows(pid: pid) else {
             return nil
         }
 
         for window in windows {
-            var posVal: CFTypeRef?
-            var sizeVal: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posVal) == .success,
-                  AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeVal) == .success,
-                  let posVal = posVal, let sizeVal = sizeVal else {
-                continue
-            }
-
-            var position = CGPoint.zero
-            var size = CGSize.zero
-            guard AXValueGetValue(posVal as! AXValue, .cgPoint, &position),
-                  AXValueGetValue(sizeVal as! AXValue, .cgSize, &size) else {
+            guard let position = AXWindowReader.position(window),
+                  let size = AXWindowReader.size(window) else {
                 continue
             }
 
@@ -1196,10 +1120,7 @@ class WindowMover: ObservableObject {
             // T5: 拓扑变化感知
             guard self.isTargetScreenAvailable(targetFrame) else { self.cancelDetectionContext(pid: pid); return }
 
-            let appElement = AXUIElementCreateApplication(pid)
-            var windowsValue: CFTypeRef?
-            let result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
-            if result == .success, let windows = windowsValue as? [AXUIElement], !windows.isEmpty {
+            if let windows = AXWindowReader.windows(pid: pid), !windows.isEmpty {
                 if stopFlag.trySet() {
                     // R-128: 停止 AX timer 但保留 context
                     self.stopDetectionTimers(pid: pid)
@@ -1237,9 +1158,9 @@ class WindowMover: ObservableObject {
     /// RT56: visibleFrame 容差（避免 Dock 高度变化时误判）
     private static let screenFrameTolerance: CGFloat = 1.0
 
-    /// 判断目标屏幕 frame 是否仍可识别
+    /// D3: 判断目标屏幕 frame 是否仍可识别——统一走 ScreenManager.screens
     private func isTargetScreenAvailable(_ targetFrame: CGRect) -> Bool {
-        return getCurrentScreenMappings().contains { abs($0.frame.minX - targetFrame.minX) < Self.screenFrameTolerance
+        return screenManager.screens.contains { abs($0.frame.minX - targetFrame.minX) < Self.screenFrameTolerance
             && abs($0.frame.minY - targetFrame.minY) < Self.screenFrameTolerance
             && abs($0.frame.width - targetFrame.width) < Self.screenFrameTolerance
             && abs($0.frame.height - targetFrame.height) < Self.screenFrameTolerance
@@ -1267,10 +1188,7 @@ class WindowMover: ObservableObject {
             // FIX-启动不搬窗: CG/AX 精确匹配失败时（如微信），回退到 pickMainWindow
             //   从 AX 窗口列表中挑主窗口搬动，与 onWindowDetected(AX) 路径保持一致
             logger.warning("onWindowDetected(CG) matchAXWindow 失败，回退 pickMainWindow: pid=\(pid) initialBounds=\(NSStringFromRect(initialBounds), privacy: .public)")
-            let appElement = AXUIElementCreateApplication(pid)
-            var windowsValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
-               let axWindows = windowsValue as? [AXUIElement] {
+            if let axWindows = AXWindowReader.windows(pid: pid) {
                 let titlePattern = activeDetections[pid]?.titlePattern
                 let filteredWindows = filterWindowsByTitle(axWindows, pattern: titlePattern)
                 if let mainWindow = pickMainWindow(from: filteredWindows) {
@@ -1333,9 +1251,7 @@ class WindowMover: ObservableObject {
             return windows // 无 pattern = 匹配所有
         }
         return windows.filter { window in
-            var titleValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success,
-                  let title = titleValue as? String, !title.isEmpty else {
+            guard let title = AXWindowReader.string(window, kAXTitleAttribute as String), !title.isEmpty else {
                 return false // 无标题的窗口在 pattern 模式下不匹配
             }
             return title.localizedCaseInsensitiveContains(pattern)
@@ -1349,23 +1265,10 @@ class WindowMover: ObservableObject {
         var largestWindow: AXUIElement?
 
         for window in windows {
-            var posValue: CFTypeRef?
-            var sizeValue: CFTypeRef?
-            let posOK = AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success
-            let sizeOK = AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success
-            guard posOK, sizeOK, let posVal = posValue, let sizeVal = sizeValue else { continue }
+            guard let bounds = AXWindowReader.bounds(window) else { continue }
 
-            var pos = CGPoint.zero
-            var size = CGSize.zero
-            AXValueGetValue(posVal as! AXValue, .cgPoint, &pos)
-            AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
-            let bounds = CGRect(origin: pos, size: size)
-
-            // 拿 title
-            var titleValue: CFTypeRef?
-            let hasTitle = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue) == .success
-                && titleValue != nil
-                && (titleValue as? String)?.isEmpty == false
+            // 拿 title（非空才算有标题）
+            let hasTitle = !(AXWindowReader.string(window, kAXTitleAttribute as String) ?? "").isEmpty
 
             if hasTitle {
                 withTitle.append((window, bounds))
@@ -1452,10 +1355,7 @@ class WindowMover: ObservableObject {
                 } else if let bounds = currentBounds {
                     // RT153: matchAXWindow 精确匹配失败时，回退到 pickMainWindow 兜底
                     //   与 onWindowDetected(CG) 路径保持一致
-                    let appElement = AXUIElementCreateApplication(pid)
-                    var windowsValue: CFTypeRef?
-                    if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
-                       let axWindows = windowsValue as? [AXUIElement],
+                    if let axWindows = AXWindowReader.windows(pid: pid),
                        let mainWindow = self.pickMainWindow(from: axWindows) {
                         self.hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
                     } else {
@@ -1469,28 +1369,9 @@ class WindowMover: ObservableObject {
     }
 
     /// 判断窗口是否"在目标屏合理位置"：窗口中心点在 visibleFrame 内 AND 窗口至少有 50% 在 visibleFrame 内
-    /// FIX-自由移动: 改用"中心点 AND 50%面积"双条件判定
-    /// FIX-坐标系: bounds 来自 CGWindowList (TL, Y向下)，targetFrame 来自 NSScreen (BL, Y向上)。
-    ///   需将 targetFrame 转换为 TL 后再比较。X 轴两系统相同。
+    /// D4: 实现外移至 SwallowScreenCore.ScreenGeometry（纯函数，供单测覆盖），此处仅转发
     private func isBoundsInTargetFrame(_ bounds: CGRect, targetFrame: CGRect) -> Bool {
-        // 将 visibleFrame 从 BL 转换为 TL
-        let targetFrameTL = visibleFrameToTL(targetFrame)
-        let center = CGPoint(x: bounds.midX, y: bounds.midY)
-        // 中心点在 visibleFrame 内——窗口主体在正确屏幕
-        guard targetFrameTL.contains(center) else { return false }
-        // 窗口至少有 50% 面积在 visibleFrame 内——窗口没有大部分在屏外
-        let overlapRatio = windowOverlapRatio(bounds, targetFrame: targetFrameTL)
-        return overlapRatio >= 0.5
-    }
-
-    /// 计算窗口与目标屏 visibleFrame 的重叠面积占比
-    private func windowOverlapRatio(_ bounds: CGRect, targetFrame: CGRect) -> CGFloat {
-        let intersection = bounds.intersection(targetFrame)
-        if intersection.isNull || intersection.isEmpty { return 0 }
-        let windowArea = bounds.width * bounds.height
-        guard windowArea > 0 else { return 0 }
-        let intersectionArea = intersection.width * intersection.height
-        return intersectionArea / windowArea
+        ScreenGeometry.isBoundsInTargetFrame(bounds, targetFrame: targetFrame, screenHeight: primaryScreenHeight)
     }
 
     /// FIX-启动不搬窗: CGWindowList 看不到窗口时，直接通过 AX API 获取并搬动窗口
@@ -1498,10 +1379,7 @@ class WindowMover: ObservableObject {
     /// RT161: 只搬主窗口（与 onWindowDetected(AX) 路径一致），
     ///        避免多窗口 App 的辅助窗口被误搬
     private func moveAXWindowsToTargetFrame(for pid: pid_t, targetFrame: CGRect) -> Bool {
-        let appElement = AXUIElementCreateApplication(pid)
-        var windowsValue: CFTypeRef?
-        let axResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
-        guard axResult == .success, let axWindows = windowsValue as? [AXUIElement], !axWindows.isEmpty else {
+        guard let axWindows = AXWindowReader.windows(pid: pid), !axWindows.isEmpty else {
             return false
         }
 
@@ -1510,14 +1388,8 @@ class WindowMover: ObservableObject {
             return false
         }
 
-        // 校验主窗口仍可访问
-        guard isAXWindowAlive(mainWindow) else { return false }
-        var positionValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(mainWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
-              positionValue != nil,
-              AXUIElementCopyAttributeValue(mainWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              sizeValue != nil else { return false }
+        // 校验主窗口仍可访问（位置+尺寸可读）
+        guard AXWindowReader.bounds(mainWindow) != nil else { return false }
 
         logger.debug("启动搬窗: AX 直接搬主窗口 pid=\(pid, privacy: .public)")
         hideMoveUnhide(axWindows: [mainWindow], targetFrame: targetFrame)
@@ -1549,15 +1421,16 @@ class WindowMover: ObservableObject {
         isPerformingInitialMove = false
         moveAllAppsTask?.cancel()
         moveAllAppsTask = nil
-        lastMovedWindows.removeAll()
+        // D2: 重置移动/守卫/重试冷却键（原 lastMovedWindows/movingWindows/cooldownWorkItems 三套）
+        //     注意保留 axFallback/axTimeout/fsExit 键——与原实现语义一致（stopMonitoring 同样保留 fsExit）
+        cooldowns.removeKeys { key in
+            key.hasPrefix("move:") || key.hasPrefix("moving:") || key.hasPrefix("unhide:")
+        }
         previousWindowPositions.removeAll()
         previousWindowPositionsOrder.removeAll()
         // R-151: 同步清配套 Set
         previousWindowPositionsOrderSet.removeAll()
-        movingWindows.removeAll()
         stabilityCount.removeAll()
-        for item in cooldownWorkItems.values { item.cancel() }
-        cooldownWorkItems.removeAll()
 
         // RT74: 启动期标志开启；checkAndEnforcePinnedWindows 期间会跳过 pinToScreen 分支
         isPerformingInitialMove = true
@@ -1586,7 +1459,7 @@ class WindowMover: ObservableObject {
     /// 应用启动时移动所有已打开应用到指定屏幕
     /// RT3: 改走 earlyWindowCatcher，与 handleAppLaunch 共享同一 hide/move/unhide + 稳态校验链路
     /// RT53: 改为 async，每批 earlyWindowCatcher 调用后 await Task.yield()，避免主 RunLoop 瞬时过载
-    /// RT73: 每个 app 重新读 getCurrentScreenMappings()，启动期屏拓扑变化时仍能匹配最新屏幕
+    /// RT73: 每个 app 走 ScreenManager 统一解析目标屏，启动期屏拓扑变化时仍能匹配最新屏幕
     /// FIX-启动不搬窗: 改为直接搬窗逻辑，与 checkAndEnforcePinnedWindows 风格一致
     private func moveAllOpenAppsToAssignedScreens() async {
         guard let modelContext = modelContext else { return }
@@ -1618,7 +1491,7 @@ class WindowMover: ObservableObject {
             pidToApp[app.processIdentifier] = app
         }
 
-        let currentScreens = getCurrentScreenMappings()
+        // D3: 目标屏解析统一走 ScreenManager.resolveTarget（原 currentScreens 局部变量删除）
 
         // RT53: 每批最多处理 5 个 app 后让出主 RunLoop
         let batchSize = 5
@@ -1629,8 +1502,8 @@ class WindowMover: ObservableObject {
             guard appInfo.isEnabled else { continue }
             guard appInfo.targetScreenID != nil || appInfo.targetScreenSerialNumber != nil || appInfo.targetScreenName != nil else { continue }
 
-            // RT69: 走 resolveTargetFrame helper
-            guard let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) else {
+            // RT69: 走统一目标屏解析
+            guard let resolved = screenManager.resolveTarget(for: appInfo) else {
                 // RT31: 同上，moveAllOpenAppsToAssignedScreens 路径也要打日志
                 logger.error("未找到 App 配置的目标屏幕（启动时）: bundleID=\(appInfo.bundleIdentifier, privacy: .public) targetScreenID=\(String(describing: appInfo.targetScreenID), privacy: .public) targetScreenSerialNumber=\(appInfo.targetScreenSerialNumber ?? "<nil>", privacy: .public) targetScreenName=\(appInfo.targetScreenName ?? "<nil>", privacy: .public)")
                 continue
@@ -1677,23 +1550,19 @@ class WindowMover: ObservableObject {
         timer?.cancel()
         timer = nil
         isMonitoring = false
-        lastMovedWindows.removeAll()
+        // D2: 清移动/守卫/重试/兜底/超时冷却键（覆盖原 stopMonitoring 五处清理）
+        //     fsExit 保留——与原实现一致（stopMonitoring 不清退出全屏冷却），
+        //     避免 stop→start 3s 内全屏窗口重复触发退出动画
+        cooldowns.removeKeys { key in
+            !key.hasPrefix("fsExit:")
+        }
         previousWindowPositions.removeAll()
         previousWindowPositionsOrder.removeAll()
         // R-151: 同步清配套 Set
         previousWindowPositionsOrderSet.removeAll()
-        movingWindows.removeAll()
         for context in activeDetections.values { context.cancel() }
         activeDetections.removeAll()
         stabilityCount.removeAll()
-        for item in cooldownWorkItems.values { item.cancel() }
-        cooldownWorkItems.removeAll()
-        // RT160: 取消 AX 兜底延迟任务
-        for item in axFallbackWorkItems { item.cancel() }
-        axFallbackWorkItems.removeAll()
-        // FIX-#4: 取消 AXObserver 空闲超时任务
-        for item in axObserverTimeoutItems.values { item.cancel() }
-        axObserverTimeoutItems.removeAll()
         lastAppsFingerprint = 0
         cachedPinnedApps = []
         // AXObserver 清理
@@ -1734,6 +1603,13 @@ class WindowMover: ObservableObject {
         let count = self.checkCallCount
         if count <= 5 || count % 30 == 0 {
             logger.debug("checkAndEnforcePinnedWindows: 被调用 #\(count)")
+        }
+
+        // D3 兜底: Dock/菜单栏自动隐藏只改 visibleFrame，不触发 didChangeScreenParameters 通知；
+        //     每 2s（20 个 100ms tick）兜底刷新一次屏幕列表，
+        //     恢复原 getCurrentScreenMappings 2s 缓存的兜底语义
+        if count % 20 == 0 {
+            screenManager.refreshScreens()
         }
 
         guard let modelContext = modelContext else {
@@ -1791,8 +1667,7 @@ class WindowMover: ObservableObject {
             return
         }
 
-        // 获取当前所有屏幕信息
-        let currentScreens = getCurrentScreenMappings()
+        // D3: 屏幕列表由 ScreenManager 统一维护（原 getCurrentScreenMappings 删除）
 
         // FIX-响应慢: 一次性获取所有 running apps，避免循环内多次调用 runningApplications(withBundleIdentifier:)
         let runningApps = NSWorkspace.shared.runningApplications
@@ -1819,8 +1694,8 @@ class WindowMover: ObservableObject {
         let allOnScreenWindows = fetchAllOnScreenWindowBounds()
 
         for appInfo in pinnedApps {
-            // RT69: 走 resolveTargetFrame helper
-            guard let resolved = resolveTargetFrame(for: appInfo, currentScreens: currentScreens) else { continue }
+            // RT69: 走统一目标屏解析（D3: ScreenManager.resolveTarget）
+            guard let resolved = screenManager.resolveTarget(for: appInfo) else { continue }
 
             // FIX-响应慢: 从预缓存字典查找运行中的应用
             guard let app = runningAppByBundleID[appInfo.bundleIdentifier] else { continue }
@@ -1839,7 +1714,7 @@ class WindowMover: ObservableObject {
                 // 首窗口沿用 "\(pid)-main" 保持与既有冷却/位置记录兼容，其余窗口追加索引后缀
                 let wid = index == 0 ? windowID : "\(windowID)-\(index)"
                 // 各窗口独立冷却检查，避免无意义的 AX 调用
-                if lastMovedWindows.contains(wid) || movingWindows.contains(wid) { continue }
+                if cooldowns.isCoolingDown("move:\(wid)") || cooldowns.isCoolingDown("moving:\(wid)") { continue }
                 checkWindowPosition(pid: pid, screenFrame: resolved.frame, targetFrame: resolved.visibleFrame, appBundleID: appInfo.bundleIdentifier, screenID: resolved.id, prebuiltMainBounds: bounds, windowKey: wid)
             }
         }
@@ -1906,43 +1781,28 @@ class WindowMover: ObservableObject {
             let keys = Array(axMetadataCache.keys.prefix(removeCount))
             for key in keys { axMetadataCache.removeValue(forKey: key) }
         }
-        if movingWindows.count > Self.windowDictionaryMaxCount {
-            let removeCount = Self.windowDictionaryMaxCount / 2
-            let snapshot = Array(movingWindows)
-            for id in snapshot.prefix(removeCount) {
-                movingWindows.remove(id)
-            }
-            // P2: 改用 Logger——字典清理频率低
-            logger.debug("movingWindows 触发清理: 移除 \(removeCount) 条，剩余 \(self.movingWindows.count)")
+        // D2: moving 进行中守卫上限清理（原 movingWindows 半量清理）
+        //     先取一次 count 再判定，避免审查指出的同谓词重复遍历（review 中优先级·中）
+        let movingCount = cooldowns.count(where: { $0.hasPrefix("moving:") })
+        if movingCount > Self.windowDictionaryMaxCount {
+            let removed = cooldowns.removeOldest(Self.windowDictionaryMaxCount / 2, where: { $0.hasPrefix("moving:") })
+            logger.debug("movingWindows 触发清理: 移除 \(removed) 条，剩余 \(movingCount - removed)")
         }
-        // P2-上限: lastMovedWindows 无显式上限——启动期 moveAllOpenAppsToAssignedScreens
-        //     可能一次性插入 N 条，5s 后才由 cooldownWorkItems 清理；加 200 上限兜底
-        if lastMovedWindows.count > Self.windowDictionaryMaxCount {
-            let removeCount = Self.windowDictionaryMaxCount / 2
-            let snapshot = Array(lastMovedWindows)
-            for id in snapshot.prefix(removeCount) {
-                lastMovedWindows.remove(id)
-            }
+        // P2-上限: 移动冷却键无显式上限——启动期 moveAllOpenAppsToAssignedScreens
+        //     可能一次性插入 N 条，5s 后才由冷却到期清理；加 200 上限兜底
+        let moveCount = cooldowns.count(where: { $0.hasPrefix("move:") })
+        if moveCount > Self.windowDictionaryMaxCount {
+            cooldowns.removeOldest(Self.windowDictionaryMaxCount / 2, where: { $0.hasPrefix("move:") })
         }
-        // P2-上限: cooldownWorkItems 无显式上限——正常 5s 后自清理，但主线程阻塞时可能累积
-        if cooldownWorkItems.count > Self.windowDictionaryMaxCount {
-            let removeCount = cooldownWorkItems.count - Self.windowDictionaryMaxCount
-            let keys = Array(cooldownWorkItems.keys.prefix(removeCount))
-            for key in keys {
-                cooldownWorkItems[key]?.cancel()
-                cooldownWorkItems.removeValue(forKey: key)
-            }
+        // P2-上限: cooldownWorkItems 全量（move:+unhide:）无显式上限——正常 5s 后自清理，
+        //     但主线程阻塞时可能累积；超限时删到上限为止
+        let retryCount = cooldowns.count(where: { $0.hasPrefix("move:") || $0.hasPrefix("unhide:") })
+        if retryCount > Self.windowDictionaryMaxCount {
+            cooldowns.removeOldest(retryCount - Self.windowDictionaryMaxCount, where: { $0.hasPrefix("move:") || $0.hasPrefix("unhide:") })
         }
     }
     
-    /// 屏幕信息结构（RT54: 与 ScreenManager.ScreenInfo 字段基本一致；保留本地 struct 以避免 isMain 字段强制传递）
-    private struct ScreenInfo {
-        let id: UInt32
-        let name: String
-        let frame: CGRect          // screen.frame（全屏区域，含菜单栏/Dock）
-        let visibleFrame: CGRect   // screen.visibleFrame（可用区域，排除菜单栏/Dock）
-        let serialNumber: String?
-    }
+    /// D3: 本地 ScreenInfo 结构已删除——统一使用 ScreenManager.ScreenInfo（含 visibleFrame 字段）
 
     /// 简单的"一次性触发"标记，用于双链并行检测中让先命中的链通知另一链停止
     /// R-213: 标记 Sendable + 方法标 nonisolated，消除 Swift 6 strict concurrency 警告
@@ -2013,19 +1873,10 @@ class WindowMover: ObservableObject {
         }
     }
     
-    // C3: 屏幕映射缓存 + 屏变化失效
-    // 之前：checkAndEnforcePinnedWindows 每 200ms × N 启用 App 都重算
-    //       NSScreen.screens 遍历 + 每屏 IOKit serialNumber 调 IOKit
-    // 现在：缓存 2s，期间复用；屏变化时 invalidateScreenCache 立即失效
-    private var cachedScreenMappings: [ScreenInfo]?
-    private var screenCacheValidUntil: Date = .distantPast
-
-    /// 失效屏幕缓存（屏变化时由 observer 调用）
+    /// 屏变化处理（原 invalidateScreenCache：C3 屏幕缓存已收敛至 ScreenManager，仅清理 pin 侧缓存）
     /// 声明为 nonisolated 允许从 nonisolated 上下文（如 NotificationCenter observer）直接调用
-    nonisolated func invalidateScreenCache() {
+    nonisolated func handleScreenConfigurationChanged() {
         Task { @MainActor in
-            self.cachedScreenMappings = nil
-            self.screenCacheValidUntil = .distantPast
             // FIX-响应慢: 屏幕拓扑变化后 pinTargetCache 中的 frame 可能已失效，需要重建
             self.pinTargetCache.removeAll()
             self.pinWindowCache.removeAll()
@@ -2039,94 +1890,11 @@ class WindowMover: ObservableObject {
         }
     }
 
-    /// 获取当前屏幕映射（C3: 缓存 2s，命中时直接返回；过期或失效则重算）
-    /// RT54 注: ScreenManager 是 @MainActor 实例类，无 shared；本方法保留为本地实现，但与 ScreenManager.screens 字段结构保持一致
-    private func getCurrentScreenMappings() -> [ScreenInfo] {
-        if let cached = cachedScreenMappings, Date() < screenCacheValidUntil {
-            return cached
-        }
-        var mappings: [ScreenInfo] = []
-        for screen in NSScreen.screens {
-            let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
-            let name = screen.localizedName
-            let frame = screen.frame
-            let visibleFrame = screen.visibleFrame
-            let serialNumber = ScreenManager.serialNumber(for: screen)
-            mappings.append(ScreenInfo(id: screenID, name: name, frame: frame, visibleFrame: visibleFrame, serialNumber: serialNumber))
-        }
-        cachedScreenMappings = mappings
-        screenCacheValidUntil = Date().addingTimeInterval(2.0)  // 2s 兜底过期
-        return mappings
-    }
-    /// 通过序列号查找屏幕
-    private func findScreenBySerialNumber(_ serialNumber: String?, currentScreens: [ScreenInfo]) -> ScreenInfo? {
-        guard let serial = serialNumber, !serial.isEmpty else { return nil }
+    /// D3: 原 getCurrentScreenMappings / findScreenBySerialNumber / findScreenByName /
+    ///     resolveTargetFrame / 本地 ScreenInfo 并行实现已删除——
+    ///     屏幕列表、匹配逻辑（screen(id:/serialNumber:/name:)）与目标屏解析
+    ///     （resolveTarget(for:)）统一收敛到 ScreenManager
 
-        // 只进行精确匹配，避免错误匹配
-        if let matched = currentScreens.first(where: { $0.serialNumber == serial }) {
-            return matched
-        }
-        // RT42: 匹配失败时输出 debug 日志
-        let candidates = currentScreens.compactMap { $0.serialNumber }.joined(separator: ", ")
-        // P2: 改用 Logger——失败时打 debug，避免在 Release 构建中触发字符串构造
-        logger.debug("findScreenBySerialNumber 未匹配: 输入=\(serial, privacy: .public) 候选=[\(candidates, privacy: .public)]")
-        return nil
-    }
-
-    /// 通过名称查找屏幕
-    private func findScreenByName(_ name: String, currentScreens: [ScreenInfo]) -> ScreenInfo? {
-        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedName.isEmpty else { return nil }
-
-        // RT6: 精确匹配 + 标准化匹配（trim + caseInsensitive）
-        if let exact = currentScreens.first(where: {
-            $0.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(normalizedName) == .orderedSame
-        }) {
-            return exact
-        }
-        // R-228: 兼容旧版本——旧版存储的 targetScreenName 可能含分辨率后缀
-        //        （如 "DELL U2720Q (2560x1440)"），R-222 后 name 仅 localizedName
-        //        与 ScreenManager.screen(name:) 保持一致的兼容逻辑
-        for screen in currentScreens {
-            let screenName = screen.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !screenName.isEmpty && normalizedName.caseInsensitiveCompare(screenName) != .orderedSame
-                && normalizedName.hasPrefix(screenName) {
-                let suffix = normalizedName.dropFirst(screenName.count).trimmingCharacters(in: .whitespacesAndNewlines)
-                if suffix.hasPrefix("(") || suffix.first?.isNumber == true {
-                    return screen
-                }
-            }
-        }
-        // RT42: 匹配失败时输出 debug 日志
-        let candidates = currentScreens.map { $0.name }.joined(separator: " | ")
-        // P2: 改用 Logger——失败时打 debug
-        logger.debug("findScreenByName 未匹配: 输入=\(normalizedName, privacy: .public) 候选=[\(candidates, privacy: .public)]")
-        return nil
-    }
-
-    /// RT69: 抽 resolveTargetFrame helper
-    /// 三处调用点（handleAppLaunch / moveAllOpenAppsToAssignedScreens / checkAndEnforcePinnedWindows）统一
-    /// 优先级：serialNumber → screenID → screenName
-    /// - Returns: (frame, visibleFrame, id) 三元组
-    ///   - frame: screen.frame（全屏区域），用于回弹时计算视觉中心
-    ///   - visibleFrame: screen.visibleFrame（可用区域），用于判定窗口是否在目标屏 + clamp
-    ///   - id: 屏幕ID，仅 checkAndEnforcePinnedWindows 需要
-    private func resolveTargetFrame(for appInfo: AppInfo, currentScreens: [ScreenInfo]) -> (frame: CGRect, visibleFrame: CGRect, id: UInt32)? {
-        if let serialNumber = appInfo.targetScreenSerialNumber,
-           let matched = findScreenBySerialNumber(serialNumber, currentScreens: currentScreens) {
-            return (matched.frame, matched.visibleFrame, matched.id)
-        }
-        if let screenID = appInfo.targetScreenID,
-           let screenInfo = getScreenInfo(for: screenID) {
-            return (screenInfo.frame, screenInfo.visibleFrame, screenID)
-        }
-        if let screenName = appInfo.targetScreenName,
-           let matched = findScreenByName(screenName, currentScreens: currentScreens) {
-            return (matched.frame, matched.visibleFrame, matched.id)
-        }
-        return nil
-    }
-    
     /// 检查窗口位置并处理
     /// RT4: 鼠标位置不再作为唯一跳过条件；主判定改为"窗口中心点 OR 50% 面积在目标屏 visibleFrame 内"
     /// C2: 加 AX 元数据缓存——title/role/size 按位置 50px 网格分桶缓存。
@@ -2164,23 +1932,16 @@ class WindowMover: ObservableObject {
         // FIX-Electron 步骤 3: 窗口不在目标屏——需要 AX 引用来移动
 
         // 冷却检查（外层已过滤，保留作为防御）
-        if lastMovedWindows.contains(windowID) || movingWindows.contains(windowID) { return }
+        if cooldowns.isCoolingDown("move:\(windowID)") || cooldowns.isCoolingDown("moving:\(windowID)") { return }
 
         // FIX-Electron 步骤 4: 通过 AX 获取窗口引用（只尝试一次，不遍历所有 AX 窗口）
-        let appElement = AXUIElementCreateApplication(pid)
-        var windowsValue: CFTypeRef?
-        let axResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
-        guard axResult == .success, let axWindows = windowsValue as? [AXUIElement] else { return }
+        guard let axWindows = AXWindowReader.windows(pid: pid) else { return }
 
         // 找位置最接近 CGWindowList 结果的 AX 窗口
         var bestWindow: AXUIElement? = nil
         var bestDistance: CGFloat = .greatestFiniteMagnitude
         for axWindow in axWindows {
-            var positionValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
-                  let posVal = positionValue else { continue }
-            var axPosition = CGPoint.zero
-            AXValueGetValue(posVal as! AXValue, .cgPoint, &axPosition)
+            guard let axPosition = AXWindowReader.position(axWindow) else { continue }
             let dx = axPosition.x - bounds.origin.x
             let dy = axPosition.y - bounds.origin.y
             let distance = dx * dx + dy * dy
@@ -2200,7 +1961,7 @@ class WindowMover: ObservableObject {
         }
 
         // FIX-Electron 步骤 5: 执行移动
-        movingWindows.insert(windowID)
+        cooldowns.hold("moving:\(windowID)")
         // FIX-侧边: 传入 bounds.size 作为 prebuiltSize，避免 AX 读取 size 失败导致居中偏移
         moveWindowToTargetScreen(targetWindow, screenFrame: screenFrame, visibleFrame: targetFrame, windowID: windowID, prebuiltSize: bounds.size)
     }
@@ -2217,11 +1978,7 @@ class WindowMover: ObservableObject {
         if let cached = pinWindowCache[pid] {
             targetWindow = cached
         } else {
-            let appElement = AXUIElementCreateApplication(pid)
-            var windowsValue: CFTypeRef?
-            let axResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsValue)
-
-            guard axResult == .success, let axWindows = windowsValue as? [AXUIElement], !axWindows.isEmpty else {
+            guard let axWindows = AXWindowReader.windows(pid: pid), !axWindows.isEmpty else {
                 // AX 失败（如 Electron 应用）——回退到 CGWindowList 路径
                 checkWindowPosition(pid: pid, screenFrame: screenFrame, targetFrame: targetFrame, appBundleID: "", screenID: screenID)
                 return
@@ -2230,9 +1987,7 @@ class WindowMover: ObservableObject {
             // 找主窗口：优先找 kAXMainAttribute == true 的窗口，否则取第一个
             var mainWindow: AXUIElement? = nil
             for axWindow in axWindows {
-                var mainValue: CFTypeRef?
-                if AXUIElementCopyAttributeValue(axWindow, kAXMainAttribute as CFString, &mainValue) == .success,
-                   let isMain = mainValue as? Bool, isMain {
+                if AXWindowReader.bool(axWindow, kAXMainAttribute as String) == true {
                     mainWindow = axWindow
                     break
                 }
@@ -2242,17 +1997,13 @@ class WindowMover: ObservableObject {
         }
 
         // 读取窗口位置
-        var positionValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(targetWindow, kAXPositionAttribute as CFString, &positionValue) == .success,
-              let posVal = positionValue else {
+        guard let position = AXWindowReader.position(targetWindow) else {
             // 无法读取位置——缓存可能失效，清除后回退
             pinWindowCache.removeValue(forKey: pid)
             pinWindowSizeCache.removeValue(forKey: pid)
             checkWindowPosition(pid: pid, screenFrame: screenFrame, targetFrame: targetFrame, appBundleID: "", screenID: screenID)
             return
         }
-        var position = CGPoint.zero
-        AXValueGetValue(posVal as! AXValue, .cgPoint, &position)
 
         // FIX-响应慢: size 也缓存，避免每次 kAXSizeAttribute 查询
         // FIX-#5: 缓存超过 TTL 强制重读刷新，保证窗口 resize 后尺寸新鲜
@@ -2261,10 +2012,8 @@ class WindowMover: ObservableObject {
            Date().timeIntervalSince(cached.cachedAt) < Self.pinWindowSizeCacheTTL {
             size = cached.size
         } else {
-            var sizeValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(targetWindow, kAXSizeAttribute as CFString, &sizeValue) == .success,
-               let sizeVal = sizeValue {
-                AXValueGetValue(sizeVal as! AXValue, .cgSize, &size)
+            if let cachedSize = AXWindowReader.size(targetWindow) {
+                size = cachedSize
                 pinWindowSizeCache[pid] = (size, Date())
             }
         }
@@ -2282,7 +2031,7 @@ class WindowMover: ObservableObject {
         }
 
         // 窗口不在目标屏——冷却检查（与 checkWindowPosition 普通路径一致，在位置判断之后）
-        if lastMovedWindows.contains(windowID) || movingWindows.contains(windowID) { return }
+        if cooldowns.isCoolingDown("move:\(windowID)") || cooldowns.isCoolingDown("moving:\(windowID)") { return }
 
         // FIX-问题23根因A: fastPath 同样可能命中全屏主窗口——先退出全屏再搬（方案 A）
         if isWindowFullScreen(targetWindow) {
@@ -2292,7 +2041,7 @@ class WindowMover: ObservableObject {
 
         // 直接移动（已有 AX 窗口引用）
         // FIX-侧边: 传入 bounds.size 作为 prebuiltSize，避免 AX 读取 size 失败导致居中偏移
-        movingWindows.insert(windowID)
+        cooldowns.hold("moving:\(windowID)")
         moveWindowToTargetScreen(targetWindow, screenFrame: screenFrame, visibleFrame: targetFrame, windowID: windowID, prebuiltSize: bounds.size)
     }
 
@@ -2303,13 +2052,10 @@ class WindowMover: ObservableObject {
     /// 信号 2：AXFullScreen 布尔属性 == true（部分应用只暴露此属性）
     /// 注意：kAXFullScreenAttribute 常量在 Swift scope 不存在，属性名用字符串
     private func isWindowFullScreen(_ window: AXUIElement) -> Bool {
-        if let subrole = copyAXString(window, attribute: kAXSubroleAttribute as CFString),
-           subrole == "AXFullScreenWindow" {
+        if AXWindowReader.string(window, kAXSubroleAttribute as String) == "AXFullScreenWindow" {
             return true
         }
-        var value: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &value) == .success,
-           let flag = value as? Bool, flag {
+        if AXWindowReader.bool(window, "AXFullScreen") == true {
             return true
         }
         return false
@@ -2321,56 +2067,26 @@ class WindowMover: ObservableObject {
     /// 退出后窗口回到原屏幕，由 100ms 轮询按普通窗口路径搬回目标屏
     private func triggerExitFullScreen(pid: pid_t, window: AXUIElement, windowID: String) {
         // 防重入：退出全屏动画约 0.5-1s，期间轮询每 100ms 命中一次，3s 冷却内不重复触发
-        if let last = fullscreenExitAttempts[pid], Date().timeIntervalSince(last) < 3.0 { return }
-        fullscreenExitAttempts[pid] = Date()
+        let fsKey = "fsExit:\(pid)"
+        if cooldowns.isCoolingDown(fsKey) { return }
+        cooldowns.coolDown(fsKey, duration: 3.0)
 
         // 首选：直接置 AXFullScreen = false
         var result = AXUIElementSetAttributeValue(window, "AXFullScreen" as CFString, kCFBooleanFalse)
         if result != .success {
             // 兜底：部分应用不支持设置 AXFullScreen 属性——按下全屏按钮（绿灯）退出。
             // 仅当按钮 subrole 为 AXFullScreenButton 时按下，避免误触发普通窗口 AXZoomButton 的缩放
-            var buttonValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(window, kAXZoomButtonAttribute as CFString, &buttonValue) == .success,
-               let button = buttonValue {
-                var subroleValue: CFTypeRef?
-                if AXUIElementCopyAttributeValue(button as! AXUIElement, kAXSubroleAttribute as CFString, &subroleValue) == .success,
-                   let subrole = subroleValue as? String, subrole == "AXFullScreenButton" {
-                    result = AXUIElementPerformAction(button as! AXUIElement, kAXPressAction as CFString)
-                }
+            if let button = AXWindowReader.element(window, kAXZoomButtonAttribute as String),
+               AXWindowReader.string(button, kAXSubroleAttribute as String) == "AXFullScreenButton" {
+                result = AXUIElementPerformAction(button, kAXPressAction as CFString)
             }
         }
         logger.info("triggerExitFullScreen: pid=\(pid, privacy: .public) windowID=\(windowID, privacy: .public) result=\(result.rawValue, privacy: .public)")
 
         // 退出动画期间加入冷却，避免轮询在动画未完成时反复搬动
-        lastMovedWindows.insert(windowID)
-        let key = cooldownKey(windowID: windowID)
-        cooldownWorkItems[key]?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.lastMovedWindows.remove(windowID)
-            self?.cooldownWorkItems.removeValue(forKey: key)
-        }
-        cooldownWorkItems[key] = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
+        cooldowns.coolDown("move:\(windowID)", duration: 1.5)
     }
 
-    /// 读取 AX 字符串属性辅助方法（用于生成稳定的窗口标识）
-    private func copyAXString(_ window: AXUIElement, attribute: CFString) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, attribute, &value) == .success,
-              let str = value as? String else { return nil }
-        return str
-    }
-
-    /// 读取窗口 size 辅助方法
-    private func copySize(_ window: AXUIElement) -> CGSize? {
-        var sizeVal: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeVal) == .success,
-              let sizeVal = sizeVal else { return nil }
-        var size = CGSize.zero
-        guard AXValueGetValue(sizeVal as! AXValue, .cgSize, &size) else { return nil }
-        return size
-    }
-    
     /// 获取屏幕ID
     /// R-130: 改用 visibleFrame 容差匹配（与 RT56 isTargetScreenAvailable 一致），
     ///        避免 Dock 高度变化后 getScreenID 返回 nil
@@ -2407,13 +2123,9 @@ class WindowMover: ObservableObject {
     }
 
     /// 将 visibleFrame (BL) 转换为 TL 坐标系
+    /// D4: 实现外移至 SwallowScreenCore.ScreenGeometry（纯函数，供单测覆盖），此处仅转发
     private func visibleFrameToTL(_ frame: CGRect) -> CGRect {
-        CGRect(
-            x: frame.origin.x,
-            y: primaryScreenHeight - frame.maxY,  // BL 的 maxY = 顶部 → TL 的 origin.y
-            width: frame.width,
-            height: frame.height
-        )
+        ScreenGeometry.visibleFrameToTL(frame, screenHeight: primaryScreenHeight)
     }
 
     /// FIX-正中: 优先从 AX 读取 size（content 实际尺寸，不含阴影），保证居中计算准确
@@ -2421,14 +2133,8 @@ class WindowMover: ObservableObject {
     ///     用 AX size 才能保证 content 在 visibleFrame 几何中心。
     ///     仅当 AX size 读取失败（width<=0 或 height<=0）时回退到 fallback（通常是 CG bounds.size）
     private func readWindowSizeFromAX(_ window: AXUIElement, fallback: CGSize? = nil) -> CGSize {
-        var sizeValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
-           let sizeVal = sizeValue {
-            var size = CGSize.zero
-            // Swift 6 SDK: AXValueGetValue 需要 3 个参数 (value, type, outValue)
-            if AXValueGetValue(sizeVal as! AXValue, .cgSize, &size), size.width > 0, size.height > 0 {
-                return size
-            }
+        if let size = AXWindowReader.size(window), size.width > 0, size.height > 0 {
+            return size
         }
         return fallback ?? .zero
     }
@@ -2444,8 +2150,6 @@ class WindowMover: ObservableObject {
         // FIX-纵向偏移: 传入 prebuiltSize 作为 fallback，避免 AX size 读取失败
         hideMoveUnhide(axWindows: [window], targetFrame: visibleFrame, prebuiltSize: prebuiltSize)
 
-        lastMovedWindows.insert(windowID)
-
         // FIX-正中5: 回读窗口实际位置作为缓存（hideMoveUnhide 内部有 clamp，实际位置可能与理论计算不同）
         // FIX-坐标系: expectedPos 用 TL 坐标系（与 AX position 一致）
         let actualSize = readWindowSizeFromAX(window, fallback: prebuiltSize)
@@ -2456,10 +2160,8 @@ class WindowMover: ObservableObject {
         )
         // 尝试回读 AX 实际位置，失败时用计算值
         var actualPos = expectedPos
-        var posValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
-           let posVal = posValue {
-            AXValueGetValue(posVal as! AXValue, .cgPoint, &actualPos)
+        if let readPos = AXWindowReader.position(window) {
+            actualPos = readPos
         }
         previousWindowPositions[windowID] = actualPos
         if !previousWindowPositionsOrderSet.contains(windowID) {
@@ -2475,26 +2177,15 @@ class WindowMover: ObservableObject {
         }
 
         // FIX-响应慢: 冷却期从 2s 缩短到 1s，提升连续拖动场景响应
-        let key = cooldownKey(windowID: windowID)
-        cooldownWorkItems[key]?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.lastMovedWindows.remove(windowID)
-            self?.cooldownWorkItems.removeValue(forKey: key)
-        }
-        cooldownWorkItems[key] = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+        cooldowns.coolDown("move:\(windowID)", duration: 1.0)
 
-        movingWindows.remove(windowID)
+        cooldowns.release("moving:\(windowID)")
     }
 
     /// FIX-正中5: 验证窗口是否在 visibleFrame 正中，如果偏离则用 hideMoveUnhide 重新居中
     /// FIX-坐标系: AX 位置使用 TL (Y向下)，visibleFrame 使用 BL (Y向上)，需转换后比较
     private func verifyAndRecenterWindow(window: AXUIElement, visibleFrame: CGRect, windowID: String) {
-        var currentPos = CGPoint.zero
-        var posValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &posValue) == .success,
-              let posVal = posValue else { return }
-        AXValueGetValue(posVal as! AXValue, .cgPoint, &currentPos)
+        guard let currentPos = AXWindowReader.position(window) else { return }
 
         let useSize = readWindowSizeFromAX(window)
         guard useSize.width > 0, useSize.height > 0 else { return }
@@ -2514,20 +2205,10 @@ class WindowMover: ObservableObject {
         }
     }
     
-    private func getScreenInfo(for displayID: UInt32) -> (frame: CGRect, visibleFrame: CGRect)? {
-        for screen in NSScreen.screens {
-            let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
-            if screenID == displayID {
-                return (screen.frame, screen.visibleFrame)
-            }
-        }
-        return nil
-    }
-    
     func moveAppToScreen(bundleIdentifier: String, screenID: UInt32, screenSerialNumber: String?, titlePattern: String? = nil) {
-        // 首先尝试通过序列号找到屏幕
+        // 首先尝试通过序列号找到屏幕（D3: 统一走 ScreenManager 匹配）
         if let serial = screenSerialNumber {
-            if let matchedScreen = findScreenBySerialNumber(serial, currentScreens: getCurrentScreenMappings()) {
+            if let matchedScreen = screenManager.screen(serialNumber: serial) {
                 if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
                     let pid = app.processIdentifier
                     // RT67: 走 earlyWindowCatcher 链路（hide → move → unhide + 稳态校验 + 防回弹）
@@ -2538,8 +2219,8 @@ class WindowMover: ObservableObject {
             }
         }
 
-        // 备用：通过 ID 找屏幕
-        guard let screenInfo = getScreenInfo(for: screenID) else { return }
+        // 备用：通过 ID 找屏幕（D3: 统一走 ScreenManager.screen(id:)）
+        guard let screenInfo = screenManager.screen(id: screenID) else { return }
 
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first {
             let pid = app.processIdentifier

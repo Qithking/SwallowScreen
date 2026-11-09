@@ -19,6 +19,9 @@ struct ScreenInfo: Identifiable, Hashable {
     // R-159: 本字段为兼容历史保留，存的是 screen.frame（含菜单栏/Dock 区域）；
     //        判断屏幕包含关系请用 screen.visibleFrame（见 ScreenManager.screen(containing:)）
     let frame: CGRect
+    // D3: 可用区域（排除菜单栏/Dock）——原 WindowMover 本地 ScreenInfo 并行持有此字段，
+    //     收敛后由本结构统一提供（回弹居中/可见区判定都依赖它）
+    let visibleFrame: CGRect
     let isMain: Bool
     let serialNumber: String?  // 屏幕序列号，用于跨重启识别
     // R-222: 分辨率后缀独立存储，仅用于 UI 展示
@@ -103,11 +106,32 @@ class ScreenManager: ObservableObject {
                     id: screenID,
                     name: screen.localizedName,
                     frame: screen.frame,
+                    visibleFrame: screen.visibleFrame,
                     isMain: screen == NSScreen.main,
                     serialNumber: ScreenManager.serialNumber(for: screen),
                     resolutionSuffix: nil  // 兜底构造，不含分辨率后缀
                 )
             }
+        }
+        return nil
+    }
+
+    /// D3: 按 App 配置解析目标屏幕（原 WindowMover.resolveTargetFrame 并行实现收敛于此）
+    /// 匹配优先级：serialNumber → screenID → screenName，
+    /// 复用 screen(serialNumber:)/screen(id:)/screen(name:) 统一匹配逻辑
+    /// - Returns: 匹配到的 ScreenInfo（含 frame/visibleFrame/id，供搬窗与可见区判定使用）
+    func resolveTarget(for appInfo: AppInfo) -> ScreenInfo? {
+        if let serialNumber = appInfo.targetScreenSerialNumber,
+           let matched = screen(serialNumber: serialNumber) {
+            return matched
+        }
+        if let screenID = appInfo.targetScreenID,
+           let matched = screen(id: screenID) {
+            return matched
+        }
+        if let screenName = appInfo.targetScreenName,
+           let matched = screen(name: screenName) {
+            return matched
         }
         return nil
     }
@@ -145,6 +169,7 @@ class ScreenManager: ObservableObject {
                 id: screenID,
                 name: screenName,
                 frame: frame,
+                visibleFrame: screen.visibleFrame,
                 isMain: isMain,
                 serialNumber: serialNumber,
                 resolutionSuffix: resolutionSuffix
@@ -152,7 +177,11 @@ class ScreenManager: ObservableObject {
             screenList.append(info)
         }
         
-        self.screens = screenList
+        // D3 兜底防抖: 兜底刷新每 2s 调一次，内容未变时不赋值，
+        //     避免 @Published screens 空触发 SwiftUI 无效刷新
+        if screenList != screens {
+            self.screens = screenList
+        }
     }
     
     /// T11: 屏幕序列号统一入口（与 AppDelegate/WindowMover 中旧实现格式一致）

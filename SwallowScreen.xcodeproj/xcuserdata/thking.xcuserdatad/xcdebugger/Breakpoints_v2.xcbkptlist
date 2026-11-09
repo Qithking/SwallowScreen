@@ -224,7 +224,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2289"
             endingLineNumber = "2289"
-            landmarkName = "checkWindowPositionFastPath(pid:screenFrame:targetFrame:screenID:)"
+            landmarkName = "checkAccessibilityPermission()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -240,7 +240,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2295"
             endingLineNumber = "2295"
-            landmarkName = "checkWindowPositionFastPath(pid:screenFrame:targetFrame:screenID:)"
+            landmarkName = "requestAccessibilityPermission()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -256,8 +256,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2285"
             endingLineNumber = "2285"
-            landmarkName = "checkWindowPositionFastPath(pid:screenFrame:targetFrame:screenID:)"
-            landmarkType = "7">
+            landmarkName = "WindowMover"
+            landmarkType = "3">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -272,7 +272,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2305"
             endingLineNumber = "2305"
-            landmarkName = "isWindowFullScreen(_:)"
+            landmarkName = "triggerImmediateCheck()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -287,9 +287,7 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2311"
-            endingLineNumber = "2311"
-            landmarkName = "isWindowFullScreen(_:)"
-            landmarkType = "7">
+            endingLineNumber = "2311">
          </BreakpointContent>
       </BreakpointProxy>
    </Breakpoints>
