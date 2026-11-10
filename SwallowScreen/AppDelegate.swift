@@ -665,9 +665,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let window = NSWindow(contentViewController: hostingController)
         window.title = "SwallowScreen 设置"
-        window.styleMask = [.titled, .closable]
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
         window.isReleasedWhenClosed = false
         window.delegate = self
+        // 与新版面板 NSPanel 同款透明窗口配置：窗口透明 + 标题栏背景透明，
+        // 毛玻璃背景铺满整窗（含标题栏背后），红绿灯与标题文字由系统绘制在其上。
+        // fullSizeContentView 保留标题栏拖动能力（系统管理），标题栏可正常拖动窗口
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.titlebarAppearsTransparent = true
+        // 标题文字可见（设置窗口保留标题，不隐藏红绿灯/标题）
+        window.titleVisibility = .visible
 
         if let frameString = UserDefaults.standard.string(forKey: Self.settingsWindowFrameKey) {
             let savedFrame = NSRectFromString(frameString)

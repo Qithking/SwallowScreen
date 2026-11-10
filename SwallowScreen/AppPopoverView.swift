@@ -52,6 +52,16 @@ struct AppPopoverView: View {
 
                 toolbarArea
             }
+
+            // 自绘更新弹窗（替代 SwiftUI .alert）：
+            // 面板是 nonactivatingPanel 不激活应用，系统 sheet 依赖 key window 交互，
+            // 弹出后按钮事件无法处理导致遮罩残留；自绘 overlay 直接由按钮置 state 关闭
+            if showUpdateAlert {
+                updateAlertOverlay
+            }
+            if showUpToDateAlert {
+                upToDateAlertOverlay
+            }
         }
         // NSPanel(.titled + .fullSizeContentView) 的隐藏标题栏会注入顶部 safe area inset，
         // 内容默认下移让位形成顶部空白带；忽略它让内容顶到窗口上缘
@@ -59,8 +69,10 @@ struct AppPopoverView: View {
         // 宽度固定 360（与 NSPanel contentMin/MaxSize 一致）；
         // 高度由窗口 frame 决定（系统原生拖拽 resize），内容自动填满
         .frame(width: PanelGeometry.panelWidth)
-        // esc 关闭面板（替代 NSPopover 内建 esc 行为）
+        // esc 关闭面板（替代 NSPopover 内建 esc 行为）；弹窗打开时优先关弹窗
         .onExitCommand {
+            if showUpdateAlert { showUpdateAlert = false; return }
+            if showUpToDateAlert { showUpToDateAlert = false; return }
             NotificationCenter.default.post(name: .closeAppPanel, object: nil)
         }
         .onAppear {
@@ -75,19 +87,6 @@ struct AppPopoverView: View {
                 autoCheckForUpdate()
             }
         }
-        .alert("发现新版本 v\(latestVersion)", isPresented: $showUpdateAlert) {
-            Button("下载更新") {
-                openDownloadWindow()
-            }
-            Button("稍后", role: .cancel) {}
-        } message: {
-            Text("是否要下载并安装新版本？")
-        }
-        .alert("已是最新版本", isPresented: $showUpToDateAlert) {
-            Button("确定", role: .cancel) {}
-        } message: {
-            Text("当前版本已是最新，无需更新。")
-        }
     }
     
     @State private var showUpdateAlert: Bool = false
@@ -97,6 +96,85 @@ struct AppPopoverView: View {
     private var backgroundView: some View {
         VisualEffectView(material: .popover, blendingMode: .behindWindow, state: .active)
             .ignoresSafeArea()
+    }
+    
+    // MARK: - 更新弹窗（自绘 overlay，替代 SwiftUI .alert）
+    // 统一弹窗卡片样式：毛玻璃材质 + 圆角，与面板视觉一致
+    private var updateAlertOverlay: some View {
+        panelAlert(
+            title: "发现新版本 v\(latestVersion)",
+            message: "是否要下载并安装新版本？",
+            confirmTitle: "下载更新",
+            cancelTitle: "稍后",
+            confirmAction: {
+                showUpdateAlert = false
+                openDownloadWindow()
+            },
+            cancelAction: { showUpdateAlert = false }
+        )
+    }
+    
+    private var upToDateAlertOverlay: some View {
+        panelAlert(
+            title: "已是最新版本",
+            message: "当前版本已是最新，无需更新。",
+            confirmTitle: "确定",
+            cancelTitle: nil,
+            confirmAction: { showUpToDateAlert = false },
+            // cancelTitle 为 nil 不显示取消按钮，但传入 action 让点击遮罩也能关闭
+            //（与 updateAlert 行为一致，避免遮罩点了没反应）
+            cancelAction: { showUpToDateAlert = false }
+        )
+    }
+    
+    /// 面板内弹窗卡片：半透明遮罩 + 居中卡片（标题/消息/操作按钮）
+    private func panelAlert(
+        title: String,
+        message: String,
+        confirmTitle: String,
+        cancelTitle: String?,
+        confirmAction: @escaping () -> Void,
+        cancelAction: (() -> Void)?
+    ) -> some View {
+        ZStack {
+            // 遮罩层：点击空白处等同于取消（与取消按钮同语义）
+            Color.black.opacity(0.25)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    if let cancelAction { cancelAction() }
+                }
+            
+            VStack(spacing: 12) {
+                Text(title)
+                    .font(.headline)
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                HStack(spacing: 8) {
+                    if let cancelTitle, let cancelAction {
+                        Button(cancelTitle) { cancelAction() }
+                            .buttonStyle(ToolbarButtonStyle())
+                    }
+                    Button(confirmTitle) { confirmAction() }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.accentColor)
+                        )
+                        .foregroundColor(.white)
+                }
+                .padding(.top, 4)
+            }
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+            .padding(24)
+        }
     }
     
     // MARK: - 欢迎提示视图
@@ -472,16 +550,8 @@ struct AppPopoverView: View {
     
 
     private var updateButtonText: String {
-        switch updateStatus {
-        case .idle, .error:
-            return "检查更新"
-        case .checking:
-            return "检查中..."
-        case .available:
-            return "发现新版本"
-        case .upToDate:
-            return "已是最新"
-        }
+        // 文案单一来源：UpdateStatus.displayText（与 AboutView 共用，避免两处不一致）
+        updateStatus.displayText
     }
     
     // 自动检查更新（启动时调用）

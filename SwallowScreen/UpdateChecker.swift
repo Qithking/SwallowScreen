@@ -14,6 +14,8 @@ final class UpdateChecker {
         let latestVersion: String
         let hasUpdate: Bool
         let downloadURL: String
+        // GitHub Release 正文（markdown），供 UI 展示更新内容
+        let releaseNotes: String
     }
 
     enum CheckError: Error {
@@ -29,6 +31,17 @@ final class UpdateChecker {
         case available
         case upToDate
         case error
+
+        /// 状态机在 UI 上的展示文案——单一来源，AppPopoverView 与 AboutView 共用
+        ///（曾两处各自 switch 且文案不一致，抽取后统一）
+        var displayText: String {
+            switch self {
+            case .idle, .error: return "检查更新"
+            case .checking: return "检查中..."
+            case .available: return "发现新版本"
+            case .upToDate: return "已是最新"
+            }
+        }
     }
 
     static let shared = UpdateChecker()
@@ -105,7 +118,13 @@ final class UpdateChecker {
             } else {
                 downloadURL = ""
             }
-            deliver(.success(UpdateInfo(latestVersion: raw, hasUpdate: hasUpdate, downloadURL: downloadURL)))
+            deliver(.success(UpdateInfo(
+                latestVersion: raw,
+                hasUpdate: hasUpdate,
+                downloadURL: downloadURL,
+                // Release 正文（markdown）可空；markdown 渲染是展示层职责，这里透传原文
+                releaseNotes: json["body"] as? String ?? ""
+            )))
         }
         task?.resume()
     }
