@@ -10,7 +10,8 @@ import Foundation
 /// 更新下载渠道
 /// - github: GitHub 官网直连（默认，与既有行为一致）
 /// - ghproxy: GitHub 加速镜像（gh-proxy.com 前缀代理）
-enum UpdateChannel: String, CaseIterable {
+/// public：Core 以独立模块被 GUI 主模块 import，无 public 会导致跨模块符号不可见
+public enum UpdateChannel: String, CaseIterable {
 
     case github
     case ghproxy
@@ -20,7 +21,7 @@ enum UpdateChannel: String, CaseIterable {
 
     /// 按渠道解析下载地址
     /// - github: 原样返回；ghproxy: 仅对 github.com 域名加前缀，其余（含已带前缀的 URL）原样返回
-    func resolveDownloadURL(_ urlString: String) -> String {
+    public func resolveDownloadURL(_ urlString: String) -> String {
         guard self == .ghproxy,
               let url = URL(string: urlString),
               url.host == "github.com" else {

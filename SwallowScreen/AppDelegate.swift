@@ -12,8 +12,7 @@ import Combine
 import Carbon.HIToolbox
 import os.log
 // SPM 构建下 Core 类型位于 SwallowScreenCore 模块（SPM 自动定义 SWIFT_PACKAGE 编译条件）；
-// Xcode 工程为平面 target 无需 import。
-// 注意：不能用 canImport 判定——SPM 显式模块构建模式（包含外部依赖时启用）下其对包内依赖判定失效
+// Xcode 工程为平面 target 无需 import
 #if SWIFT_PACKAGE
 import SwallowScreenCore
 #endif

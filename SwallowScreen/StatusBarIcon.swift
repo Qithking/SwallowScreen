@@ -8,15 +8,17 @@
 
 import AppKit
 
-enum StatusBarIcon {
+// public：Core 以独立模块被 GUI 主模块 import（SPM 双 target 结构），
+// 无 public 修饰（= internal）会导致跨模块符号不可见（CI swift build 失败根因）
+public enum StatusBarIcon {
 
     /// macOS 菜单栏图标标准绘制尺寸：Apple HIG 状态栏图标在 ~18pt 内渲染，
     /// 与系统 Wi-Fi/电池等图标视觉一致（MenuIcon 资源为 24×24pt，直接渲染会偏大）
-    static let side: CGFloat = 18
+    public static let side: CGFloat = 18
 
     /// 配置菜单栏图标：模板渲染（自动适配深浅色）+ 缩放到标准尺寸。
     /// 直接修改传入实例（asset catalog 缓存实例，调用方独占使用）
-    static func applyConfiguration(to image: NSImage) {
+    public static func applyConfiguration(to image: NSImage) {
         image.isTemplate = true
         image.size = NSSize(width: side, height: side)
     }
@@ -25,7 +27,7 @@ enum StatusBarIcon {
     /// 回落 bundle Resources 裸 png（发布版 SPM 构建手工拼 bundle，不含 Assets.car，
     /// 由 CI 把 MenuIcon.imageset 的 png 拷入 Resources）；两者皆无返回 nil，
     /// 调用方继续走系统符号 fallback
-    static func loadMenuIcon(in bundle: Bundle) -> NSImage? {
+    public static func loadMenuIcon(in bundle: Bundle) -> NSImage? {
         if let image = NSImage(named: "MenuIcon") {
             applyConfiguration(to: image)
             return image

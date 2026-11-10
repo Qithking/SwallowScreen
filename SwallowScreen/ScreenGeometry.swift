@@ -13,11 +13,13 @@
 
 import CoreGraphics
 
-enum ScreenGeometry {
+// public：Core 以独立模块被 GUI 主模块 import（SPM 双 target 结构），
+// 无 public 修饰（= internal）会导致跨模块符号不可见（CI swift build 失败根因）
+public enum ScreenGeometry {
 
     /// 将 visibleFrame（BL 坐标系）转换为 TL 坐标系
     /// - Parameter screenHeight: 主屏幕高度（NSScreen.screens[0].frame.height）
-    static func visibleFrameToTL(_ frame: CGRect, screenHeight: CGFloat) -> CGRect {
+    public static func visibleFrameToTL(_ frame: CGRect, screenHeight: CGFloat) -> CGRect {
         CGRect(
             x: frame.origin.x,
             y: screenHeight - frame.maxY,  // BL 的 maxY = 顶部 → TL 的 origin.y
@@ -27,7 +29,7 @@ enum ScreenGeometry {
     }
 
     /// 计算窗口 bounds 与目标区域的重叠面积占窗口总面积的比例（0...1）
-    static func windowOverlapRatio(_ bounds: CGRect, targetFrame: CGRect) -> CGFloat {
+    public static func windowOverlapRatio(_ bounds: CGRect, targetFrame: CGRect) -> CGFloat {
         let intersection = bounds.intersection(targetFrame)
         if intersection.isNull || intersection.isEmpty { return 0 }
         let windowArea = bounds.width * bounds.height
@@ -37,7 +39,7 @@ enum ScreenGeometry {
     }
 
     /// 判断窗口是否"在目标屏合理位置"：中心点在 visibleFrame 内 AND 至少 50% 面积重叠
-    static func isBoundsInTargetFrame(_ bounds: CGRect,
+    public static func isBoundsInTargetFrame(_ bounds: CGRect,
                                       targetFrame: CGRect,
                                       screenHeight: CGFloat) -> Bool {
         let targetFrameTL = visibleFrameToTL(targetFrame, screenHeight: screenHeight)
