@@ -8,13 +8,20 @@
 import AppKit
 import SwiftUI
 import SwiftData
+import Combine
 import Carbon.HIToolbox
 import os.log
+// SPM 构建下 PanelGeometry 位于 SwallowScreenCore 模块；Xcode 工程为平面 target 无需 import
+#if canImport(SwallowScreenCore)
+import SwallowScreenCore
+#endif
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem?
-    private var appPopover: NSPopover?
+    // 菜单面板：无边框 NSPanel 替代 NSPopover——拖拽 resize 走窗口系统原生路径
+    //（与拖 Finder 窗口边缘同机制，完全跟手零闪动），不再需要自定义拖拽逻辑
+    private var appPanel: NSPanel?
     private var modelContainer: ModelContainer?
     private var windowMover: WindowMover?
     private var settingsWindow: NSWindow?
@@ -24,8 +31,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var openSettingsObserverToken: Any?
     private var pinToScreenObserverToken: Any?
     private var appearanceObserverToken: Any?
+    private var closePanelObserverToken: Any?
+    // 点击面板外（其他应用）关闭面板的全局鼠标监听，模拟 NSPopover.transient 行为
+    private var outsideClickMonitor: Any?
 
-    // AppManager/ScreenManager 由 AppDelegate 持有，避免每次 popover 重建时重新扫描目录、重建图标缓存（峰值 +2-4MB 内存抖动）
+    // AppManager/ScreenManager 由 AppDelegate 持有，避免每次面板重建时重新扫描目录、重建图标缓存（峰值 +2-4MB 内存抖动）
     let appManager = AppManager()
     let screenManager = ScreenManager()
     
@@ -49,6 +59,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupScreenChangeObserver()
         setupGlobalHotKeys()
         setupSettingsWindowObserver()
+        setupOutsideClickMonitor()
 
         // 初始化窗口管理器（最后初始化，确保 modelContainer 已就绪）；
         // 用可取消的 DispatchWorkItem，便于终止时撤销
@@ -147,56 +158,123 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
     
-    private func initializePopover() {
-        guard let container = modelContainer else {
-            setupModelContainer()
-            guard modelContainer != nil else {
-                return
+    // MARK: - 菜单面板（NSPanel）
+
+    private func setupOutsideClickMonitor() {
+        // 全局鼠标按下（其他应用的事件）：点击处必在面板外（面板属本应用），直接关闭。
+        // 本应用内点击由 windowDidResignKey 覆盖；handler 经 Task 回主线程操作 UI
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.hideAppPanel()
             }
-            setupPopoverWithContainer(modelContainer!)
-            return
         }
-        
-        setupPopoverWithContainer(container)
     }
-    
-    private func setupPopoverWithContainer(_ container: ModelContainer) {
-        // 注入 AppDelegate 持有的 appManager/screenManager，避免每次 popover 重建
-        let contentView = AppPopoverView()
+
+    private func makeAppPanel() -> NSPanel {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: PanelGeometry.panelWidth, height: PanelGeometry.defaultHeight),
+            styleMask: [.titled, .fullSizeContentView, .resizable, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        // fullSizeContentView + 隐藏标题栏：保留系统圆角/阴影，视觉与原 popover 一致；
+        // 红绿灯按钮不适用于菜单面板（关闭即点击面板外/esc），逐一隐藏
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        // 面板实例跨显示复用，关闭仅 orderOut，不释放
+        panel.isReleasedWhenClosed = false
+        // nonactivatingPanel 不抢焦点；面板内 TextField 仍可正常聚焦输入
+        panel.hidesOnDeactivate = false
+        panel.isFloatingPanel = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // 宽度锁定 360（spec：仅高度可调），高度范围 400-800 与 clamp 逻辑一致
+        panel.contentMinSize = NSSize(width: PanelGeometry.panelWidth, height: PanelGeometry.minHeight)
+        panel.contentMaxSize = NSSize(width: PanelGeometry.panelWidth, height: PanelGeometry.maxHeight)
+        panel.isMovableByWindowBackground = false
+        panel.delegate = self
+        return panel
+    }
+
+    private func makePanelContent(container: ModelContainer) -> some View {
+        AppPopoverView()
             .modelContainer(container)
             .environmentObject(appManager)
             .environmentObject(screenManager)
-
-        let hostingController = NSHostingController(rootView: contentView)
-
-        let popover = NSPopover()
-        popover.contentViewController = hostingController
-        popover.behavior = .transient
-        popover.animates = true
-
-        appPopover = popover
     }
-    
-    @objc private func toggleAppWindow() {
-        guard let button = statusItem?.button else { return }
 
-        if let popover = appPopover, popover.isShown {
-            popover.performClose(nil)
-            // 关闭后立即释放 contentViewController，切断 popover 视图引用链；
-            // appManager/screenManager 由 AppDelegate 持有，不受影响
-            popover.contentViewController = nil
-            // popover 关闭时取消正在进行的更新检查，避免 task 完成后回调已释放的 UI
-            UpdateChecker.shared.cancel()
+    private func showAppPanel() {
+        guard let container = tryEnsureModelContainer() else { return }
+        let panel = appPanel ?? makeAppPanel()
+        appPanel = panel
+
+        // 恢复持久化高度（clamp 兜底），再定位到状态项按钮下方
+        restoreAppPanelFrame(panel)
+        // 每次显示重建 hostingView：保证 SwiftUI onAppear 触发
+        //（搜索重置、屏幕刷新、欢迎提示、自动检查更新均依赖 onAppear）
+        panel.contentView = NSHostingView(rootView: makePanelContent(container: container))
+        positionAppPanel(panel)
+        panel.makeKeyAndOrderFront(nil)
+        // 面板成为 key 后清掉初始键盘焦点（否则焦点环落在工具栏按钮上）；
+        // 搜索框聚焦由用户点击触发，不受影响
+        panel.makeFirstResponder(nil)
+    }
+
+    private func hideAppPanel() {
+        guard let panel = appPanel, panel.isVisible else { return }
+        persistAppPanelHeight(panel.frame.height)
+        panel.orderOut(nil)
+        // 面板关闭时取消正在进行的更新检查，避免回调后操作已移除的 UI
+        UpdateChecker.shared.cancel()
+    }
+
+    /// 从持久化设置恢复面板高度（设置缺失/脏数据时经 PanelGeometry 兜底）
+    private func restoreAppPanelFrame(_ panel: NSPanel) {
+        var persisted: Double?
+        if let container = modelContainer,
+           let settings = try? container.mainContext.fetch(FetchDescriptor<AppSettings>()).first {
+            persisted = settings.popoverHeight
+        }
+        let visibleHeight = NSScreen.main?.visibleFrame.height ?? PanelGeometry.maxHeight
+        let height = PanelGeometry.restoredHeight(persisted: persisted, screenVisibleHeight: visibleHeight)
+        panel.setContentSize(NSSize(width: PanelGeometry.panelWidth, height: height))
+    }
+
+    /// 面板定位到状态项按钮正下方，水平 clamp 在按钮所在屏的可见区域内
+    private func positionAppPanel(_ panel: NSPanel) {
+        guard let button = statusItem?.button, let buttonWindow = button.window else { return }
+        let buttonFrame = buttonWindow.convertToScreen(button.frame)
+        let screen = NSScreen.screens.first { $0.frame.contains(buttonFrame.origin) } ?? NSScreen.main
+        guard let screen else { return }
+        let visible = screen.visibleFrame
+        let x = min(max(buttonFrame.minX, visible.minX),
+                    max(visible.minX, visible.maxX - panel.frame.width))
+        let y = buttonFrame.minY - panel.frame.height
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    /// 拖拽结束/面板关闭时写回持久化高度（与旧 NSPopover 实现同一 AppSettings 字段）
+    private func persistAppPanelHeight(_ height: CGFloat) {
+        guard let container = modelContainer else { return }
+        let visibleHeight = NSScreen.main?.visibleFrame.height ?? PanelGeometry.maxHeight
+        let clamped = PanelGeometry.clampHeight(height, screenVisibleHeight: visibleHeight)
+        let descriptor = FetchDescriptor<AppSettings>()
+        guard let settings = try? container.mainContext.fetch(descriptor).first else { return }
+        settings.popoverHeight = Double(clamped)
+        // 与 AppPopoverView.updateSetting 同口径：非关键路径 try? 可接受
+        try? container.mainContext.save()
+    }
+
+    @objc private func toggleAppWindow() {
+        if let panel = appPanel, panel.isVisible {
+            hideAppPanel()
         } else {
-            if appPopover == nil {
-                initializePopover()
-            } else if appPopover?.contentViewController == nil, let container = modelContainer {
-                setupPopoverWithContainer(container)
-            }
-            if let popover = appPopover {
-                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-                NSApp.activate(ignoringOtherApps: true)
-            }
+            showAppPanel()
         }
     }
     
@@ -233,6 +311,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             Task { @MainActor in
                 self.windowMover?.triggerImmediateCheck()
+            }
+        }
+
+        // esc 关闭面板（SwiftUI onExitCommand 发出，替代 popover 内建 esc 行为）
+        closePanelObserverToken = NotificationCenter.default.addObserver(
+            forName: .closeAppPanel,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.hideAppPanel()
             }
         }
     }
@@ -526,7 +616,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - 设置窗口
     @objc private func openSettingsWindow() {
-        appPopover?.performClose(nil)
+        // 打开设置窗口前先收起面板（原 popover 关闭行为）
+        hideAppPanel()
 
         if let existing = settingsWindow {
             // 不强制 center()：保留用户上次调整的窗口位置
@@ -624,6 +715,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let token = appearanceObserverToken {
             NotificationCenter.default.removeObserver(token)
         }
+        if let token = closePanelObserverToken {
+            NotificationCenter.default.removeObserver(token)
+        }
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
 
     /// 集中清理所有 NotificationCenter observer——deinit 与 applicationWillTerminate 共用
@@ -648,6 +745,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NotificationCenter.default.removeObserver(token)
             appearanceObserverToken = nil
         }
+        if let token = closePanelObserverToken {
+            NotificationCenter.default.removeObserver(token)
+            closePanelObserverToken = nil
+        }
+        // NSEvent 监听随清理一并移除
+        if let monitor = outsideClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            outsideClickMonitor = nil
+        }
     }
 }
 
@@ -663,15 +769,32 @@ extension AppDelegate {
         saveSettingsWindowFrameDebounced(from: notification.object as? NSWindow)
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        // 点击本应用其他窗口（如设置窗口）时面板失焦即收起；
+        // orderOut 触发的二次 resignKey 由 hideAppPanel 的 isVisible 守卫拦截
+        guard let window = notification.object as? NSWindow, window == appPanel else { return }
+        hideAppPanel()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        // 用户拖拽窗口边缘结束：写回持久化高度（系统已由 contentMin/MaxSize 限制范围）
+        guard let window = notification.object as? NSWindow, window == appPanel else { return }
+        persistAppPanelHeight(window.frame.height)
+    }
+
     func windowWillClose(_ notification: Notification) {
-        if let window = notification.object as? NSWindow {
-            // 立即写一次（取消 pending 防抖），确保关闭前 frame 已落盘
-            flushPendingFrameSave(window: window)
-            // 解除反向引用
-            if window == settingsWindow {
-                window.delegate = nil
-                settingsWindow = nil
-            }
+        guard let window = notification.object as? NSWindow else { return }
+        // 面板：app 终止等 close 路径保存高度，不走设置窗口 frame 落盘
+        if window == appPanel {
+            persistAppPanelHeight(window.frame.height)
+            return
+        }
+        // 立即写一次（取消 pending 防抖），确保关闭前 frame 已落盘
+        flushPendingFrameSave(window: window)
+        // 解除反向引用
+        if window == settingsWindow {
+            window.delegate = nil
+            settingsWindow = nil
         }
     }
 

@@ -16,46 +16,55 @@ import SwallowScreenCore
 
 struct AppPopoverView: View {
     @Environment(\.modelContext) private var modelContext
-    // 改用 @EnvironmentObject：由 AppDelegate 注入，跨 popover 生命周期复用；
-    // @StateObject 每次 popover 重建都会重扫目录和图标缓存
+    // 改用 @EnvironmentObject：由 AppDelegate 注入，跨面板生命周期复用；
+    // @StateObject 每次面板重建都会重扫目录和图标缓存
     @EnvironmentObject private var appManager: AppManager
     @EnvironmentObject private var screenManager: ScreenManager
-    
+
     @Query private var appInfos: [AppInfo]
     @Query private var appSettings: [AppSettings]
-    
+
     @State private var searchText = ""
     @State private var selectedAppForConfig: SystemApp?
 
     @State private var showWelcomeTip: Bool = false
-    
+
     @State private var isCheckingUpdate: Bool = false
     @State private var updateStatus: UpdateChecker.UpdateStatus = .idle
     @State private var latestVersion: String = ""
     @State private var downloadURL: String = ""
-    
+
     var body: some View {
         ZStack {
             backgroundView
-            
+
             VStack(spacing: 0) {
                 if showWelcomeTip {
                     welcomeTipView
                 }
                 searchArea
-                
+
                 Divider()
-                
+
                 appListArea
-                
+
                 Divider()
-                
+
                 toolbarArea
             }
         }
-        .frame(width: 360, height: 500)
+        // NSPanel(.titled + .fullSizeContentView) 的隐藏标题栏会注入顶部 safe area inset，
+        // 内容默认下移让位形成顶部空白带；忽略它让内容顶到窗口上缘
+        .ignoresSafeArea(edges: .top)
+        // 宽度固定 360（与 NSPanel contentMin/MaxSize 一致）；
+        // 高度由窗口 frame 决定（系统原生拖拽 resize），内容自动填满
+        .frame(width: PanelGeometry.panelWidth)
+        // esc 关闭面板（替代 NSPopover 内建 esc 行为）
+        .onExitCommand {
+            NotificationCenter.default.post(name: .closeAppPanel, object: nil)
+        }
         .onAppear {
-            // AppManager 跨 popover 生命周期复用，每次打开时重置搜索状态
+            // AppManager 跨面板生命周期复用，每次打开时重置搜索状态
             if appManager.searchText != "" {
                 appManager.searchText = ""
             }
@@ -174,9 +183,16 @@ struct AppPopoverView: View {
                 .buttonStyle(.plain)
             }
         }
+        // 圆角浅色背景突出搜索焦点（毛玻璃上用 primary 低透明度，深浅色模式都自然）
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.primary.opacity(0.06))
+        )
         .padding(12)
     }
-    
+
     // MARK: - 应用列表区域
     private var appListArea: some View {
         ScrollView {
@@ -193,6 +209,18 @@ struct AppPopoverView: View {
                         Spacer()
                     }
                     .padding(.vertical, 24)
+                } else if appManager.filteredApps.isEmpty {
+                    // 搜索无结果空状态
+                    VStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                        Text("未找到匹配应用")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 32)
                 } else {
                     ForEach(appManager.filteredApps) { app in
                         AppRowView(
@@ -231,11 +259,11 @@ struct AppPopoverView: View {
                     Text("设置")
                 }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ToolbarButtonStyle())
             .foregroundColor(.primary)
-            
+
             Spacer()
-            
+
             Button(action: {
                 checkForUpdate()
             }) {
@@ -249,10 +277,10 @@ struct AppPopoverView: View {
                     Text(updateButtonText)
                 }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ToolbarButtonStyle())
             .foregroundColor(updateStatus == .available ? .green : .primary)
             .disabled(isCheckingUpdate)
-            
+
             Button(action: {
                 NSApplication.shared.terminate(nil)
             }) {
@@ -261,7 +289,7 @@ struct AppPopoverView: View {
                     Text("退出")
                 }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ToolbarButtonStyle())
             .foregroundColor(.red)
         }
         .padding(.horizontal, 12)
@@ -512,6 +540,23 @@ struct AppPopoverView: View {
     }
 }
 
+// MARK: - 工具栏按钮样式
+/// plain 基础上加 hover 圆角高亮，与列表行 hover 效果一致
+private struct ToolbarButtonStyle: ButtonStyle {
+    @State private var isHovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(nsColor: .selectedContentBackgroundColor).opacity(isHovering ? 0.1 : 0))
+            )
+            .onHover { isHovering = $0 }
+    }
+}
+
 // MARK: - 应用行视图
 struct AppRowView: View {
     let app: SystemApp
@@ -557,6 +602,16 @@ struct AppRowView: View {
             Text(app.name)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            
+            if app.isSystemApp {
+                // 系统应用徽标：淡色胶囊文字标签，区分系统应用与第三方应用
+                Text("系统")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+            }
             
             if isMenuBarApp {
                 Image(systemName: "menubar.rectangle")
@@ -634,6 +689,9 @@ extension Notification.Name {
     static let openSettingsWindow = Notification.Name("openSettingsWindow")
 
     static let pinToScreenChanged = Notification.Name("pinToScreenChanged")
+
+    // esc 关闭菜单面板（AppPopoverView onExitCommand → AppDelegate 收起面板）
+    static let closeAppPanel = Notification.Name("closeAppPanel")
 }
 
 #Preview {

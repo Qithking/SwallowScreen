@@ -16,7 +16,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "430"
             endingLineNumber = "430"
-            landmarkName = "unregisterHotKeys()"
+            landmarkName = "registerHotKeys()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -32,7 +32,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "444"
             endingLineNumber = "444"
-            landmarkName = "unregisterHotKeys()"
+            landmarkName = "registerHotKeys()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -48,8 +48,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "174"
             endingLineNumber = "174"
-            landmarkName = "initializePopover()"
-            landmarkType = "7">
+            landmarkName = "AppDelegate"
+            landmarkType = "3">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -96,7 +96,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "297"
             endingLineNumber = "297"
-            landmarkName = "startPermissionCheckTimer()"
+            landmarkName = "setupSettingsWindowObserver()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>

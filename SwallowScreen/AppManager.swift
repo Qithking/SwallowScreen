@@ -19,6 +19,11 @@ struct SystemApp: Identifiable, Hashable, Sendable {
                         // nonisolated 上下文可构造（icon 传 nil 时无 NSImage 跨隔离问题）
     let isMenuBarApp: Bool
 
+    // 系统应用判定：路径前缀 /System/Applications，第三方应用不误标
+    var isSystemApp: Bool {
+        path.hasPrefix("/System/Applications")
+    }
+
     // nonisolated init：允许在 Task.detached / static nonisolated 方法中构造
     nonisolated init(bundleIdentifier: String, name: String, path: String, icon: NSImage?, isMenuBarApp: Bool = false) {
         self.id = bundleIdentifier

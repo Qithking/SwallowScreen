@@ -32,6 +32,9 @@ final class AppSettings {
     // 行内默认值同时作为 SwiftData 轻量迁移默认值：老 Store 记录读取时自动填充
     var updateChannel: String = UpdateChannel.github.rawValue
 
+    // 面板高度（拖拽调整，400-800 范围内）；行内默认 500 兼容老记录
+    var popoverHeight: Double = 500
+
     var createdAt: Date
 
     var updatedAt: Date
@@ -45,6 +48,7 @@ final class AppSettings {
         self.clearScreenKeyCode = 0x19 // 数字键2
         self.clearScreenModifiers = UInt32(cmdKey | shiftKey)
         self.updateChannel = UpdateChannel.github.rawValue
+        self.popoverHeight = 500
         self.createdAt = Date()
         self.updatedAt = Date()
     }

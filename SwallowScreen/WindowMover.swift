@@ -36,7 +36,7 @@ class WindowMover: ObservableObject {
     // 辅助 Set，contains O(1) 避免数组 O(n) 扫描
     private var previousWindowPositionsOrderSet: Set<String> = []
     // 冷却与守卫状态存于 CooldownRegistry——key 约定见其头注释
-    private let cooldowns = CooldownRegistry()
+    private nonisolated(unsafe) let cooldowns = CooldownRegistry()
     // AX 元数据缓存（title/role/size），按位置 50px 网格分桶——窗口静止时复用，AX 调用 ↓ ~75%
     // previousWindowPositions 管"位置是否变化"，本缓存管"title/role/size 是否需重读"
     private var axMetadataCache: [String: (title: String, role: String, size: CGSize?)] = [:]
@@ -1278,7 +1278,7 @@ class WindowMover: ObservableObject {
                 if let bounds = currentBounds,
                    let axWindow = self.matchAXWindow(for: pid, targetBounds: bounds) {
                     self.hideMoveUnhide(axWindows: [axWindow], targetFrame: targetFrame)
-                } else if let bounds = currentBounds {
+                } else if currentBounds != nil {
                     // matchAXWindow 精确匹配失败时，回退到 pickMainWindow 兜底
                     // 与 onWindowDetected(CG) 路径保持一致
                     if let axWindows = AXWindowReader.windows(pid: pid),
@@ -2104,6 +2104,8 @@ class WindowMover: ObservableObject {
     /// 移动窗口到指定位置（居中）
     /// 坐标系：macOS 左下角原点，Y 轴向上。kAXPositionAttribute = 窗口左下角坐标。
     /// size 获取优先级：prebuiltSize > AX kAXSizeAttribute > CGWindowList bounds.size
+    /// - Returns: 新的窗口位置（BL 坐标）；调用方通常不关心结果
+    @discardableResult
     private func moveWindowToFrameImmediate(_ window: AXUIElement, targetFrame: CGRect, prebuiltSize: CGSize? = nil) -> CGPoint? {
         // 多层 fallback 获取窗口尺寸：
         // 1. prebuiltSize（调用方传入的 CGWindowList bounds.size，最可靠）
