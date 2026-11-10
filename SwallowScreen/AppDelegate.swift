@@ -133,8 +133,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 提取图标设置，方便 dark mode 切换时重设
     private func applyStatusItemImage() {
         guard let button = button else { return }
+        // 菜单栏图标必须缩放到标准 18pt 并用模板渲染（见 StatusBarIcon）：
+        // MenuIcon 资源为 24×24pt，不缩放会比系统状态栏图标明显偏大
         if let image = NSImage(named: "MenuIcon") {
-            image.isTemplate = true
+            StatusBarIcon.applyConfiguration(to: image)
             button.image = image
         } else if let image = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "SwallowScreen") {
             image.isTemplate = true
