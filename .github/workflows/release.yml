@@ -192,18 +192,8 @@ jobs:
       - name: Generate Release Body
         id: release_body
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          
-          if [ -n "$PREV_TAG" ]; then
-            CHANGELOG=$(git log "$PREV_TAG"..HEAD --oneline --format='  - %s' 2>/dev/null | head -50 || echo "  - 无更新内容")
-          else
-            CHANGELOG=$(git log --oneline --format='  - %s' | head -20 2>/dev/null || echo "  - 无更新内容")
-          fi
-          
-          {            
-            echo "### 更新内容"
-            echo "$CHANGELOG"
-            echo ""           
+          # Release 正文不使用提交内容，仅保留安装说明与系统要求
+          {
             echo "### 安装说明"
             echo "  1. 下载并打开 DMG 文件"
             echo "  2. 将 SwallowScreen.app 拖入 Applications 文件夹"
@@ -218,6 +208,7 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
+          name: release
           body_path: release_body.txt
           files: SwallowScreen-*.dmg
           draft: false
