@@ -43,6 +43,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var clearScreenHotKeyID = EventHotKeyID()
     private var setScreenHotKeyRef: EventHotKeyRef?
     private var clearScreenHotKeyRef: EventHotKeyRef?
+    // 快捷键搬窗/暂停热键引用（id: 3=上一屏 4=下一屏 5=暂停/恢复）
+    private var movePrevHotKeyRef: EventHotKeyRef?
+    private var moveNextHotKeyRef: EventHotKeyRef?
+    private var togglePauseHotKeyRef: EventHotKeyRef?
     // Carbon 事件 handler 引用，applicationWillTerminate 时显式释放
     private var hotKeyHandlerRef: EventHandlerRef?
     // setupWindowMover 1s 延时的 DispatchWorkItem，可取消
@@ -203,11 +207,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return panel
     }
 
+    @ViewBuilder
     private func makePanelContent(container: ModelContainer) -> some View {
-        AppPopoverView()
-            .modelContainer(container)
-            .environmentObject(appManager)
-            .environmentObject(screenManager)
+        // windowMover 延迟 1s 初始化，正常面板打开时必然就绪；未就绪时不渲染面板内容
+        if let windowMover {
+            AppPopoverView()
+                .modelContainer(container)
+                .environmentObject(appManager)
+                .environmentObject(screenManager)
+                .environmentObject(windowMover)
+        }
     }
 
     private func showAppPanel() {
@@ -414,6 +423,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var setModifiers: UInt32 = UInt32(cmdKey | shiftKey)
         var clearKeyCode: UInt32 = 0x19
         var clearModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        // 快捷键搬窗/暂停默认值（AppSettings 行内默认值同源）
+        var movePrevKeyCode: UInt32 = 0x7B  // ←
+        var movePrevModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        var moveNextKeyCode: UInt32 = 0x7C  // →
+        var moveNextModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        var togglePauseKeyCode: UInt32 = 0x25  // P
+        var togglePauseModifiers: UInt32 = UInt32(cmdKey | shiftKey)
 
         // 先移除旧 handler，防止异常路径下重复注册导致
         // setCurrentAppScreen/clearCurrentAppScreen 被双触发
@@ -429,9 +445,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 setModifiers = settings.setScreenModifiers
                 clearKeyCode = UInt32(settings.clearScreenKeyCode)
                 clearModifiers = settings.clearScreenModifiers
+                movePrevKeyCode = UInt32(settings.moveWindowPrevScreenKeyCode)
+                movePrevModifiers = settings.moveWindowPrevScreenModifiers
+                moveNextKeyCode = UInt32(settings.moveWindowNextScreenKeyCode)
+                moveNextModifiers = settings.moveWindowNextScreenModifiers
+                togglePauseKeyCode = UInt32(settings.togglePauseKeyCode)
+                togglePauseModifiers = settings.togglePauseModifiers
             }
         }
-        
+
         setScreenHotKeyID.signature = OSType(0x5357434E)
         setScreenHotKeyID.id = 1
         clearScreenHotKeyID.signature = OSType(0x5357434E)
@@ -449,6 +471,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             os_log("RegisterEventHotKey(clear) failed: status=%d keyCode=0x%X",
                    log: OSLog.default, type: .error, Int(clearStatus), clearKeyCode)
             clearScreenHotKeyRef = nil
+        }
+
+        // 快捷键搬窗/暂停注册（无需额外权限，Carbon 全局热键）
+        let movePrevID = EventHotKeyID(signature: OSType(0x5357434E), id: 3)
+        let moveNextID = EventHotKeyID(signature: OSType(0x5357434E), id: 4)
+        let togglePauseID = EventHotKeyID(signature: OSType(0x5357434E), id: 5)
+        if RegisterEventHotKey(movePrevKeyCode, movePrevModifiers, movePrevID, GetApplicationEventTarget(), 0, &movePrevHotKeyRef) != noErr {
+            movePrevHotKeyRef = nil
+        }
+        if RegisterEventHotKey(moveNextKeyCode, moveNextModifiers, moveNextID, GetApplicationEventTarget(), 0, &moveNextHotKeyRef) != noErr {
+            moveNextHotKeyRef = nil
+        }
+        if RegisterEventHotKey(togglePauseKeyCode, togglePauseModifiers, togglePauseID, GetApplicationEventTarget(), 0, &togglePauseHotKeyRef) != noErr {
+            togglePauseHotKeyRef = nil
         }
 
         var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -471,6 +507,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
                     delegate.clearCurrentAppScreen()
                 }
+            } else if hotKeyID.id == 3 {
+                Task { @MainActor in
+                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+                    delegate.windowMover?.moveFrontWindowToAdjacentScreen(next: false)
+                }
+            } else if hotKeyID.id == 4 {
+                Task { @MainActor in
+                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+                    delegate.windowMover?.moveFrontWindowToAdjacentScreen(next: true)
+                }
+            } else if hotKeyID.id == 5 {
+                Task { @MainActor in
+                    let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+                    // windowMover 延迟 1s 初始化；未就绪时热键静默忽略
+                    delegate.windowMover?.setPaused(!(delegate.windowMover?.isPaused ?? false))
+                }
             }
             return noErr
         }
@@ -491,6 +543,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let clearHotKey = clearScreenHotKeyRef {
             UnregisterEventHotKey(clearHotKey)
             clearScreenHotKeyRef = nil
+        }
+        if let hotKey = movePrevHotKeyRef {
+            UnregisterEventHotKey(hotKey)
+            movePrevHotKeyRef = nil
+        }
+        if let hotKey = moveNextHotKeyRef {
+            UnregisterEventHotKey(hotKey)
+            moveNextHotKeyRef = nil
+        }
+        if let hotKey = togglePauseHotKeyRef {
+            UnregisterEventHotKey(hotKey)
+            togglePauseHotKeyRef = nil
         }
         if let handler = hotKeyHandlerRef {
             RemoveEventHandler(handler)

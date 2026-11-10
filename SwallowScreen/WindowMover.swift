@@ -23,6 +23,12 @@ class WindowMover: ObservableObject {
 
     @Published var isMonitoring: Bool = false
     @Published var hasAccessibilityPermission: Bool = false
+    // 全局暂停窗口管理（内存态）：true 时三条 pin 链路短路，不自动搬窗；
+    // 持久化在 AppSettings.isPaused，由 setPaused 统一同步（设置页与快捷键共用入口）
+    @Published var isPaused: Bool = false
+    // pin 状态回传（bundleID → 主窗口是否在目标屏）：供应用列表行状态可视化；
+    // 仅在轮询检查中值变化时写入，避免每 100ms 触发 objectWillChange
+    @Published var pinStatusByBundleID: [String: Bool] = [:]
     
     private var timer: DispatchSourceTimer?
     private var modelContext: ModelContext?
@@ -427,6 +433,8 @@ class WindowMover: ObservableObject {
     /// 松手检测用 NSEvent.addGlobalMonitorForEvents(.leftMouseUp)，比轮询可靠
     private func handlePinWindowMoved(pid: pid_t) {
         guard !isPerformingInitialMove else { return }
+        // 全局暂停：moved 事件链路短路，拖拽窗口不回弹
+        guard !isPaused else { return }
 
         let windowID = "\(pid)-main"
         guard !cooldowns.isCoolingDown("moving:\(windowID)") else { return }
@@ -448,6 +456,8 @@ class WindowMover: ObservableObject {
     private func handlePinWindowCreated(pid: pid_t, element: AXUIElement) {
         // 启动期跳过——启动窗口由 handleAppLaunch / earlyWindowCatcher 负责
         guard !isPerformingInitialMove else { return }
+        // 全局暂停：created 事件链路短路，新窗口不自动搬动（恢复后由轮询纠正）
+        guard !isPaused else { return }
 
         // 快照截止窗口内忽略——订阅 created 后应用会为所有已存在窗口
         // 补发快照通知，此时搬动会与启动稳定性校验冲突，窗口停在错误屏幕
@@ -696,6 +706,8 @@ class WindowMover: ObservableObject {
     /// 处理应用启动
     /// isEnabled/bundleID 均为非 optional，可在 SQLite 层过滤；hasTarget 含 targetScreenName
     private func handleAppLaunch(bundleIdentifier: String, pid: pid_t) {
+        // 全局暂停：启动期不自动搬窗（与设置页文案一致），恢复后由轮询纠正
+        guard !isPaused else { return }
         guard let modelContext = modelContext else { return }
 
         // 组合谓词：isEnabled + bundleIdentifier 同时满足
@@ -1325,6 +1337,27 @@ class WindowMover: ObservableObject {
 
     func configure(modelContext: ModelContext) {
         self.modelContext = modelContext
+        // 从持久化设置恢复暂停状态（configure 可能因权限重试被多次调用，fetch 幂等）
+        let descriptor = FetchDescriptor<AppSettings>()
+        if let settings = try? modelContext.fetch(descriptor).first {
+            isPaused = settings.isPaused
+        }
+    }
+
+    /// 切换全局暂停状态——设置页开关与快捷键共用的单一入口
+    /// 更新内存态（三条 pin 链路读此值短路）并持久化到 AppSettings；
+    /// 设置页路径已由 markUpdated 持久化，此处写同值幂等无害
+    func setPaused(_ paused: Bool) {
+        guard isPaused != paused else { return }
+        isPaused = paused
+
+        guard let modelContext = modelContext else { return }
+        let descriptor = FetchDescriptor<AppSettings>()
+        if let settings = try? modelContext.fetch(descriptor).first {
+            settings.isPaused = paused
+            settings.updatedAt = Date()
+            try? modelContext.save()
+        }
     }
     
     func startMonitoring() -> Bool {
@@ -1357,6 +1390,8 @@ class WindowMover: ObservableObject {
         // 同步清理 Set
         previousWindowPositionsOrderSet.removeAll()
         stabilityCount.removeAll()
+        // pin 状态回传字典清空，重新由轮询填充
+        pinStatusByBundleID.removeAll()
 
         // 启动期标志开启；checkAndEnforcePinnedWindows 期间会跳过 pinToScreen 分支
         isPerformingInitialMove = true
@@ -1382,6 +1417,8 @@ class WindowMover: ObservableObject {
     /// 走 earlyWindowCatcher（与 handleAppLaunch 共享搬动 + 稳态校验链路）；每批后
     /// await Task.yield() 避免主 RunLoop 过载；目标屏统一走 ScreenManager.resolveTarget
     private func moveAllOpenAppsToAssignedScreens() async {
+        // 全局暂停：启动期全量搬窗跳过（与设置页文案一致），恢复后由轮询纠正
+        guard !isPaused else { return }
         guard let modelContext = modelContext else { return }
 
         if !AXIsProcessTrusted() {
@@ -1516,6 +1553,9 @@ class WindowMover: ObservableObject {
             logger.debug("checkAndEnforcePinnedWindows: 被调用 #\(count)")
         }
 
+        // 全局暂停：轮询链路短路，不执行任何搬窗检查（暂停期间省去 fetch/AX 调用开销）
+        guard !isPaused else { return }
+
         // Dock/菜单栏自动隐藏只改 visibleFrame，不触发 didChangeScreenParameters 通知；
         // 每 2s（20 个 100ms tick）兜底刷新一次屏幕列表
         if count % 20 == 0 {
@@ -1594,6 +1634,10 @@ class WindowMover: ObservableObject {
             for pid in pidsToRemove {
                 removePinObserver(for: pid)
             }
+            // 状态回传同步清空（UI 不再显示在位标识）
+            if !pinStatusByBundleID.isEmpty {
+                pinStatusByBundleID.removeAll()
+            }
             return
         }
 
@@ -1601,19 +1645,34 @@ class WindowMover: ObservableObject {
         let allOnScreenWindows = fetchAllOnScreenWindowBounds()
 
         for appInfo in pinnedApps {
-            guard let resolved = screenManager.resolveTarget(for: appInfo) else { continue }
+            guard let resolved = screenManager.resolveTarget(for: appInfo) else {
+                setPinStatus(appInfo.bundleIdentifier, false)
+                continue
+            }
 
-            guard let app = runningAppByBundleID[appInfo.bundleIdentifier] else { continue }
+            guard let app = runningAppByBundleID[appInfo.bundleIdentifier] else {
+                // App 未运行：窗口不存在，视为不在位
+                setPinStatus(appInfo.bundleIdentifier, false)
+                continue
+            }
 
             let pid = app.processIdentifier
             let windowID = "\(pid)-main"
 
-            // 用户正在拖拽该窗口时跳过，等松手后再检查
+            // 用户正在拖拽该窗口时跳过，等松手后再检查（状态保留旧值，松手后下一轮刷新）
             if pendingDragCheckPids.contains(pid) { continue }
 
             // 检查该 pid 的**所有**候选窗口（面积降序），不再只查面积最大的一个——
             // 多窗口应用（如 Windows App 会话窗+连接列表窗）中小窗口此前不被轮询覆盖
             let windowBoundsList = allOnScreenWindows[pid] ?? []
+
+            // pin 状态可视化回传：主窗口（面积最大）中心在目标屏且重叠 ≥50% 视为在位
+            if let mainBounds = windowBoundsList.first {
+                setPinStatus(appInfo.bundleIdentifier, isBoundsInTargetFrame(mainBounds, targetFrame: resolved.visibleFrame))
+            } else {
+                setPinStatus(appInfo.bundleIdentifier, false)
+            }
+
             for (index, bounds) in windowBoundsList.enumerated() {
                 // 首窗口沿用 "\(pid)-main" 保持与既有冷却/位置记录兼容，其余窗口追加索引后缀
                 let wid = index == 0 ? windowID : "\(windowID)-\(index)"
@@ -1629,6 +1688,13 @@ class WindowMover: ObservableObject {
             runningAppByBundleID[$0.bundleIdentifier]?.processIdentifier
         })
         removeDeadKeys(forAlivePids: alivePids)
+    }
+
+    /// pin 状态回传字典写入：值变化才写入，避免每 100ms 轮询触发无谓的 objectWillChange
+    private func setPinStatus(_ bundleID: String, _ inPlace: Bool) {
+        if pinStatusByBundleID[bundleID] != inPlace {
+            pinStatusByBundleID[bundleID] = inPlace
+        }
     }
 
     /// 清理 previousWindowPositions / axMetadataCache 中已不存在运行实例的 pid 前缀
@@ -1785,6 +1851,57 @@ class WindowMover: ObservableObject {
                 self.globalMouseUpMonitor = nil
             }
             self.refreshPinObservers()
+            // 热插拔恢复：去抖后把 pinned 窗口搬回各自目标屏
+            self.schedulePinnedRestore()
+        }
+    }
+
+    // 热插拔恢复去抖 work item——didChangeScreenParameters 可能连发多次，只搬一次
+    private var pinnedRestoreWorkItem: DispatchWorkItem?
+
+    /// 屏拓扑变化后延迟 0.6s 执行 pinned 窗口恢复（去抖，等系统完成屏幕重排）
+    private func schedulePinnedRestore() {
+        pinnedRestoreWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.restorePinnedWindowsToTargetScreens()
+        }
+        pinnedRestoreWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: item)
+    }
+
+    /// 热插拔恢复：把 pinned 窗口搬回各自目标屏
+    /// 已在目标屏的窗口跳过（避免窗口闪烁）；暂停期/启动期/单屏跳过
+    private func restorePinnedWindowsToTargetScreens() {
+        guard !isPaused, !isPerformingInitialMove else { return }
+        guard NSScreen.screens.count > 1 else { return }
+        guard let modelContext = modelContext else { return }
+
+        let descriptor = FetchDescriptor<AppInfo>(
+            predicate: #Predicate { $0.isEnabled == true },
+            sortBy: [SortDescriptor(\.bundleIdentifier)]
+        )
+        guard let allApps = try? modelContext.fetch(descriptor) else {
+            logger.error("restorePinnedWindowsToTargetScreens: SwiftData fetch 失败")
+            return
+        }
+
+        for appInfo in allApps where appInfo.pinToScreen {
+            guard let resolved = screenManager.resolveTarget(for: appInfo),
+                  let app = NSRunningApplication.runningApplications(withBundleIdentifier: appInfo.bundleIdentifier).first else { continue }
+
+            let pid = app.processIdentifier
+            // 主窗口已在目标屏则跳过——恢复只纠正偏移窗口，不打扰在位窗口
+            if let bounds = findOnScreenWindow(for: pid),
+               isBoundsInTargetFrame(bounds, targetFrame: resolved.visibleFrame) {
+                continue
+            }
+
+            moveAppToScreen(
+                bundleIdentifier: appInfo.bundleIdentifier,
+                screenID: resolved.id,
+                screenSerialNumber: resolved.serialNumber,
+                titlePattern: appInfo.windowTitlePattern
+            )
         }
     }
 
@@ -2079,6 +2196,50 @@ class WindowMover: ObservableObject {
         }
     }
     
+    /// 快捷键：把前端应用的焦点窗口移到上/下一屏（按 NSScreen.screens 顺序循环）
+    /// 只搬动焦点窗口（fallback 面积最大窗口），用 hideMoveUnhide 居中放置到目标屏 visibleFrame，
+    /// 与 pin 回弹链路一致，规避窗口管理器的吸附纠正
+    func moveFrontWindowToAdjacentScreen(next: Bool) {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication,
+              let bundleID = frontApp.bundleIdentifier,
+              bundleID != Bundle.main.bundleIdentifier else { return }
+        let pid = frontApp.processIdentifier
+
+        // 焦点窗口优先（贴近"当前窗口"语义），读不到再取面积最大的窗口
+        let appElement = AXUIElementCreateApplication(pid)
+        var targetWindow = AXWindowReader.element(appElement, kAXFocusedWindowAttribute as String)
+        if targetWindow == nil {
+            for window in AXWindowReader.windows(pid: pid) ?? [] {
+                guard let bounds = AXWindowReader.bounds(window) else { continue }
+                if let current = targetWindow, let currentBounds = AXWindowReader.bounds(current),
+                   currentBounds.width * currentBounds.height >= bounds.width * bounds.height {
+                    continue
+                }
+                targetWindow = window
+            }
+        }
+        guard let window = targetWindow, let windowBounds = AXWindowReader.bounds(window) else {
+            logger.debug("moveFrontWindowToAdjacentScreen: 读不到前端窗口 pid=\(pid)")
+            return
+        }
+
+        // AX TL 中心 → BL 全局坐标：Y 翻转公式自逆（y_BL = H − y_TL 与 blToTL_Y 的 y_TL = H − y_BL 是同一公式），直接复用
+        let centerBL = CGPoint(x: windowBounds.midX, y: blToTL_Y(windowBounds.midY))
+        let screens = NSScreen.screens
+        guard screens.count > 1,
+              let currentScreen = screens.first(where: { $0.frame.contains(centerBL) }) ?? NSScreen.main,
+              let currentIndex = screens.firstIndex(of: currentScreen) else { return }
+
+        // 循环偏移：+1 下一屏 / -1 上一屏
+        let targetIndex = (currentIndex + (next ? 1 : -1) + screens.count) % screens.count
+        let targetScreen = screens[targetIndex]
+
+        hideMoveUnhide(axWindows: [window], targetFrame: targetScreen.visibleFrame)
+        // 不写 move 冷却：对非 pinned 应用轮询不覆盖无意义；对 pinned 应用 pin 强制语义下
+        // 应立即拉回（且焦点窗口可能是副窗，固定键 "{pid}-main" 与轮询副窗键 "{pid}-main-N" 错配）
+        logger.debug("moveFrontWindowToAdjacentScreen: bundleID=\(bundleID, privacy: .public) next=\(next) → screenID=\(targetScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 ?? 0)")
+    }
+
     func moveAppToScreen(bundleIdentifier: String, screenID: UInt32, screenSerialNumber: String?, titlePattern: String? = nil) {
         // 首先尝试通过序列号找到屏幕（统一走 ScreenManager 匹配）
         if let serial = screenSerialNumber {

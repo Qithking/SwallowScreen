@@ -48,8 +48,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "174"
             endingLineNumber = "174"
-            landmarkName = "AppDelegate"
-            landmarkType = "3">
+            landmarkName = "setupOutsideClickMonitor()"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -96,7 +96,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "297"
             endingLineNumber = "297"
-            landmarkName = "setupScreenChangeObserver()"
+            landmarkName = "toggleAppWindow()"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -112,7 +112,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "326"
             endingLineNumber = "326"
-            landmarkName = "removeAXObserver(for:)"
+            landmarkName = "handleAXWindowCreated(pid:element:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -144,8 +144,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "411"
             endingLineNumber = "411"
-            landmarkName = "pinObserverCallback"
-            landmarkType = "24">
+            landmarkName = "setupPinObserver(for:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -176,7 +176,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "487"
             endingLineNumber = "487"
-            landmarkName = "startGlobalMouseUpMonitor()"
+            landmarkName = "handlePinWindowCreated(pid:element:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -192,7 +192,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "488"
             endingLineNumber = "488"
-            landmarkName = "startGlobalMouseUpMonitor()"
+            landmarkName = "handlePinWindowCreated(pid:element:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -208,8 +208,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "412"
             endingLineNumber = "412"
-            landmarkName = "pinObserverCallback"
-            landmarkType = "24">
+            landmarkName = "WindowMover"
+            landmarkType = "3">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -223,7 +223,9 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2289"
-            endingLineNumber = "2289">
+            endingLineNumber = "2289"
+            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -237,7 +239,9 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2295"
-            endingLineNumber = "2295">
+            endingLineNumber = "2295"
+            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -251,7 +255,9 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2285"
-            endingLineNumber = "2285">
+            endingLineNumber = "2285"
+            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -265,7 +271,9 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2305"
-            endingLineNumber = "2305">
+            endingLineNumber = "2305"
+            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -279,7 +287,9 @@
             startingColumnNumber = "9223372036854775807"
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2311"
-            endingLineNumber = "2311">
+            endingLineNumber = "2311"
+            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
    </Breakpoints>

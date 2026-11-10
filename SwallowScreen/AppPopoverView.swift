@@ -20,6 +20,7 @@ struct AppPopoverView: View {
     // @StateObject 每次面板重建都会重扫目录和图标缓存
     @EnvironmentObject private var appManager: AppManager
     @EnvironmentObject private var screenManager: ScreenManager
+    @EnvironmentObject private var windowMover: WindowMover
 
     @Query private var appInfos: [AppInfo]
     @Query private var appSettings: [AppSettings]
@@ -307,6 +308,8 @@ struct AppPopoverView: View {
                             selectedScreen: getSelectedScreen(for: app),
                             isPinToScreen: getIsPinToScreen(for: app),
                             isMenuBarApp: app.isMenuBarApp,
+                            pinStatus: windowMover.pinStatusByBundleID[app.bundleIdentifier],
+                            isGloballyPaused: windowMover.isPaused,
                             onScreenSelected: { screenInfo in
                                 configureApp(app: app, screen: screenInfo)
                             },
@@ -634,6 +637,9 @@ struct AppRowView: View {
     let selectedScreen: ScreenInfo?
     let isPinToScreen: Bool
     let isMenuBarApp: Bool
+    // pin 状态可视化：nil=尚未检查；true=主窗口在目标屏；false=偏移
+    let pinStatus: Bool?
+    let isGloballyPaused: Bool
     let onScreenSelected: (ScreenInfo?) -> Void
     let onPinToScreenChanged: (Bool) -> Void
     // 图标按需加载入口；AppPopoverView 注入 AppManager.requestIcon 闭包
@@ -689,7 +695,11 @@ struct AppRowView: View {
                     .foregroundColor(.secondary)
                     .help("菜单栏应用：窗口将约束在指定屏幕")
             }
-            
+
+            if isPinToScreen {
+                pinStatusCapsule
+            }
+
             Spacer(minLength: 8)
             
             // 屏幕选择下拉框 - 最大宽度限制为当前窗口的50%
@@ -752,6 +762,30 @@ struct AppRowView: View {
             }
         }
     }
+
+    // MARK: - pin 状态胶囊（在位/偏移/已暂停）
+    /// 全局暂停时冻结显示「已暂停」；偏移用橙色警示（黄色在毛玻璃上对比度不足）
+    private var pinStatusCapsule: some View {
+        let (text, color, icon, help): (String, Color, String, String)
+        if isGloballyPaused {
+            (text, color, icon, help) = ("已暂停", .secondary, "pause.fill", "窗口管理已全局暂停，恢复后自动纠正")
+        } else if pinStatus == true {
+            (text, color, icon, help) = ("在位", .green, "checkmark.circle.fill", "主窗口当前在固定屏幕上")
+        } else {
+            (text, color, icon, help) = ("偏移", .orange, "exclamationmark.triangle.fill", "主窗口不在固定屏幕，等待自动纠正或全局暂停中")
+        }
+        return HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 8))
+            Text(text)
+        }
+        .font(.caption2)
+        .foregroundColor(color)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1)
+        .background(Capsule().fill(color.opacity(0.15)))
+        .help(help)
+    }
 }
 
 // MARK: - 通知名称
@@ -769,4 +803,5 @@ extension Notification.Name {
         .modelContainer(for: [AppInfo.self, AppSettings.self], inMemory: true)
         .environmentObject(AppManager())
         .environmentObject(ScreenManager())
+        .environmentObject(WindowMover(screenManager: ScreenManager()))
 }

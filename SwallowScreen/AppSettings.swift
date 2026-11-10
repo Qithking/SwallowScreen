@@ -29,8 +29,22 @@ final class AppSettings {
 
     var clearScreenModifiers: UInt32
 
+    // 快捷键搬窗：把前端应用主窗口移到上/下一屏（默认 Cmd+Shift+← / →）
+    var moveWindowPrevScreenKeyCode: Int32 = 0x7B  // 左方向键
+    var moveWindowPrevScreenModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+    var moveWindowNextScreenKeyCode: Int32 = 0x7C  // 右方向键
+    var moveWindowNextScreenModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+
+    // 快捷键暂停/恢复窗口管理（默认 Cmd+Shift+P）
+    var togglePauseKeyCode: Int32 = 0x25  // P 键
+    var togglePauseModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+
     // 行内默认值同时作为 SwiftData 轻量迁移默认值：老 Store 记录读取时自动填充
     var updateChannel: String = UpdateChannel.github.rawValue
+
+    // 全局暂停窗口管理：暂停期间三条 pin 链路（轮询/moved/created）不再自动搬窗；
+    // 行内默认值同时作为 SwiftData 轻量迁移默认值，老 Store 记录读取时自动填充
+    var isPaused: Bool = false
 
     // 面板高度（拖拽调整，400-800 范围内）；行内默认值（与 PanelGeometry.defaultHeight 同源）兼作 SwiftData 轻量迁移默认值，兼容老记录
     var popoverHeight: Double = Double(PanelGeometry.defaultHeight)

@@ -164,6 +164,28 @@ struct GeneralSettingsView: View {
                     }
                 }
 
+                Divider()
+                    .padding(.leading, 44)
+
+                // 暂停开关与快捷键共用 WindowMover.setPaused 入口；
+                // 快捷键切换时写 AppSettings 触发 @Query 刷新，此处 Toggle 状态自动同步
+                SettingsRow(
+                    icon: "pause.circle.fill",
+                    iconColor: .red,
+                    title: "暂停窗口管理",
+                    subtitle: "暂停后不再自动搬动固定屏幕窗口"
+                ) {
+                    if let s = settings {
+                        @Bindable var bindable = s
+                        Toggle("", isOn: $bindable.isPaused)
+                            .labelsHidden()
+                            .onChange(of: s.isPaused) { _, newValue in
+                                markUpdated()
+                                WindowMover.shared?.setPaused(newValue)
+                            }
+                    }
+                }
+
                 SettingsSectionHeader(title: "更新")
                 SettingsRow(
                     icon: "network.circle.fill",
@@ -311,6 +333,19 @@ struct HotkeySettingsView: View {
                 )
                 .onChange(of: clearScreenModifiers) { _, _ in if !isLoadingSettings { saveHotkey(.clearScreen) } }
                 .onChange(of: clearScreenKeyCode) { _, _ in if !isLoadingSettings { saveHotkey(.clearScreen) } }
+
+                SettingsSectionHeader(title: "窗口管理快捷键")
+
+                // 固定键位（暂不支持自定义），与 AppSettings 行内默认值同源
+                StaticHotkeyRow(title: "移动窗口到上一屏", subtitle: "将前台应用焦点窗口移到上一屏幕", display: "⌘⇧←")
+                Divider()
+                    .padding(.leading, 20)
+
+                StaticHotkeyRow(title: "移动窗口到下一屏", subtitle: "将前台应用焦点窗口移到下一屏幕", display: "⌘⇧→")
+                Divider()
+                    .padding(.leading, 20)
+
+                StaticHotkeyRow(title: "暂停/恢复窗口管理", subtitle: "暂停或恢复自动搬动固定屏幕窗口", display: "⌘⇧P")
 
                 SettingsSectionHeader(title: "提示")
                 HStack(spacing: 8) {
@@ -709,6 +744,33 @@ struct SettingsSectionHeader: View {
             .padding(.horizontal, 20)
             .padding(.top, 20)
             .padding(.bottom, 6)
+    }
+}
+
+// MARK: - 固定键位说明行（不可录制，仅展示）
+struct StaticHotkeyRow: View {
+    let title: String
+    let subtitle: String
+    let display: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            Text(display)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.secondary.opacity(0.12)))
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
     }
 }
 
