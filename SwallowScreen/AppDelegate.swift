@@ -214,7 +214,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appPanel = panel
 
         // 恢复持久化高度（clamp 兜底），再定位到状态项按钮下方
-        restoreAppPanelFrame(panel)
+        restoreAppPanelHeight(panel)
         // 每次显示重建 hostingView：保证 SwiftUI onAppear 触发
         //（搜索重置、屏幕刷新、欢迎提示、自动检查更新均依赖 onAppear）
         panel.contentView = NSHostingView(rootView: makePanelContent(container: container))
@@ -233,35 +233,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         UpdateChecker.shared.cancel()
     }
 
+    /// 状态项按钮的屏幕坐标 frame 及其所在屏（菜单栏在哪块屏即哪块屏）；
+    /// 面板水平定位与高度 clamp 统一以该屏为基准，按钮信息缺失时 screen 为 nil
+    private var appPanelButtonLayout: (frame: NSRect, screen: NSScreen?)? {
+        guard let button = statusItem?.button, let buttonWindow = button.window else { return nil }
+        let frame = buttonWindow.convertToScreen(button.frame)
+        let screen = NSScreen.screens.first { $0.frame.contains(frame.origin) } ?? NSScreen.main
+        return (frame, screen)
+    }
+
     /// 从持久化设置恢复面板高度（设置缺失/脏数据时经 PanelGeometry 兜底）
-    private func restoreAppPanelFrame(_ panel: NSPanel) {
+    private func restoreAppPanelHeight(_ panel: NSPanel) {
         var persisted: Double?
+        // try? 可接受：fetch 失败仅回退默认高度，与 persistAppPanelHeight 同口径
         if let container = modelContainer,
            let settings = try? container.mainContext.fetch(FetchDescriptor<AppSettings>()).first {
             persisted = settings.popoverHeight
         }
-        let visibleHeight = NSScreen.main?.visibleFrame.height ?? PanelGeometry.maxHeight
+        // 高度 clamp 以按钮所在屏为准（面板显示在哪块屏就受哪块屏约束），取不到回退上限
+        let visibleHeight = appPanelButtonLayout?.screen?.visibleFrame.height ?? PanelGeometry.maxHeight
         let height = PanelGeometry.restoredHeight(persisted: persisted, screenVisibleHeight: visibleHeight)
         panel.setContentSize(NSSize(width: PanelGeometry.panelWidth, height: height))
     }
 
     /// 面板定位到状态项按钮正下方，水平 clamp 在按钮所在屏的可见区域内
     private func positionAppPanel(_ panel: NSPanel) {
-        guard let button = statusItem?.button, let buttonWindow = button.window else { return }
-        let buttonFrame = buttonWindow.convertToScreen(button.frame)
-        let screen = NSScreen.screens.first { $0.frame.contains(buttonFrame.origin) } ?? NSScreen.main
-        guard let screen else { return }
+        guard let layout = appPanelButtonLayout, let screen = layout.screen else { return }
         let visible = screen.visibleFrame
-        let x = min(max(buttonFrame.minX, visible.minX),
+        let x = min(max(layout.frame.minX, visible.minX),
                     max(visible.minX, visible.maxX - panel.frame.width))
-        let y = buttonFrame.minY - panel.frame.height
+        let y = layout.frame.minY - panel.frame.height
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     /// 拖拽结束/面板关闭时写回持久化高度（与旧 NSPopover 实现同一 AppSettings 字段）
     private func persistAppPanelHeight(_ height: CGFloat) {
         guard let container = modelContainer else { return }
-        let visibleHeight = NSScreen.main?.visibleFrame.height ?? PanelGeometry.maxHeight
+        // 保存同样以按钮所在屏 clamp，把小屏上拖出的超屏高度挡在入库前
+        let visibleHeight = appPanelButtonLayout?.screen?.visibleFrame.height ?? PanelGeometry.maxHeight
         let clamped = PanelGeometry.clampHeight(height, screenVisibleHeight: visibleHeight)
         let descriptor = FetchDescriptor<AppSettings>()
         guard let settings = try? container.mainContext.fetch(descriptor).first else { return }

@@ -56,4 +56,9 @@ final class PanelGeometryTests: XCTestCase {
         XCTAssertEqual(PanelGeometry.restoredHeight(persisted: 10_000, screenVisibleHeight: 1000), 800)
         XCTAssertEqual(PanelGeometry.restoredHeight(persisted: -50, screenVisibleHeight: 1000), 400)
     }
+
+    // 脏数据 + 超小屏组合：下限 400 优先于 screenCap（下限兜底保证面板可用）
+    func testRestoredHeightClampsDirtyDataOnTinyScreen() {
+        XCTAssertEqual(PanelGeometry.restoredHeight(persisted: 10_000, screenVisibleHeight: 300), 400)
+    }
 }
