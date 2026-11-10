@@ -12,13 +12,14 @@
 //  - "axFallback:..."    AX 兜底延迟搬窗任务
 //  - "axTimeout:<pid>"   AXObserver 空闲超时任务
 //
-//  线程安全：deinit 是 nonisolated（可能在任意线程执行），故内部用 NSLock
-//  保护字典；DispatchWorkItem.cancel 本身线程安全。
+//  线程安全：deinit 可能在任意线程执行，内部用 NSLock 保护字典——这正是
+//  nonisolated + @unchecked Sendable 标注的依据（退出默认 MainActor 隔离，
+//  允许跨隔离域共享）；DispatchWorkItem.cancel 本身线程安全。
 //
 
 import Foundation
 
-final class CooldownRegistry {
+nonisolated final class CooldownRegistry: @unchecked Sendable {
 
     private struct Entry {
         let workItem: DispatchWorkItem?  // nil = hold 型（手动 release）

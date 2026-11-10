@@ -35,9 +35,10 @@ class WindowMover: ObservableObject {
     private var previousWindowPositionsOrder: [String] = []
     // 辅助 Set，contains O(1) 避免数组 O(n) 扫描
     private var previousWindowPositionsOrderSet: Set<String> = []
-    // 冷却与守卫状态存于 CooldownRegistry——key 约定见其头注释
-    // nonisolated(unsafe) 安全性：CooldownRegistry 内部 NSLock 保护全部读写，跨线程无数据竞争
-    private nonisolated(unsafe) let cooldowns = CooldownRegistry()
+    // 冷却与守卫状态存于 CooldownRegistry——key 约定见其头注释；
+    // 该类型为 nonisolated + @unchecked Sendable（NSLock 保护全部状态），
+    // 无需 nonisolated(unsafe)，Sendable let 在 deinit 中也可直接访问
+    private let cooldowns = CooldownRegistry()
     // AX 元数据缓存（title/role/size），按位置 50px 网格分桶——窗口静止时复用，AX 调用 ↓ ~75%
     // previousWindowPositions 管"位置是否变化"，本缓存管"title/role/size 是否需重读"
     private var axMetadataCache: [String: (title: String, role: String, size: CGSize?)] = [:]
