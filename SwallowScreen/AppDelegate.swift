@@ -138,9 +138,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func applyStatusItemImage() {
         guard let button = button else { return }
         // 菜单栏图标必须缩放到标准 18pt 并用模板渲染（见 StatusBarIcon）：
-        // MenuIcon 资源为 24×24pt，不缩放会比系统状态栏图标明显偏大
-        if let image = NSImage(named: "MenuIcon") {
-            StatusBarIcon.applyConfiguration(to: image)
+        // MenuIcon 资源为 24×24pt，不缩放会比系统状态栏图标明显偏大；
+        // 发布版 bundle 无 Assets.car，loadMenuIcon 会回落 bundle Resources 裸 png
+        if let image = StatusBarIcon.loadMenuIcon(in: .main) {
             button.image = image
         } else if let image = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "SwallowScreen") {
             image.isTemplate = true

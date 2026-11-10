@@ -20,4 +20,24 @@ enum StatusBarIcon {
         image.isTemplate = true
         image.size = NSSize(width: side, height: side)
     }
+
+    /// 加载菜单栏图标：优先 Asset Catalog（Xcode 工程构建产物含 Assets.car），
+    /// 回落 bundle Resources 裸 png（发布版 SPM 构建手工拼 bundle，不含 Assets.car，
+    /// 由 CI 把 MenuIcon.imageset 的 png 拷入 Resources）；两者皆无返回 nil，
+    /// 调用方继续走系统符号 fallback
+    static func loadMenuIcon(in bundle: Bundle) -> NSImage? {
+        if let image = NSImage(named: "MenuIcon") {
+            applyConfiguration(to: image)
+            return image
+        }
+        // @2x 优先（retina 清晰度）；点尺寸统一由 applyConfiguration 覆盖为 18pt
+        for name in ["menu_icon@2x", "menu_icon@3x", "menu_icon"] {
+            if let url = bundle.url(forResource: name, withExtension: "png"),
+               let image = NSImage(contentsOf: url) {
+                applyConfiguration(to: image)
+                return image
+            }
+        }
+        return nil
+    }
 }

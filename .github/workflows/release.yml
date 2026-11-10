@@ -100,6 +100,12 @@ jobs:
           # 使用 iconutil 生成 .icns 文件
           iconutil -c icns "$ICONSET_DIR" -o "SwallowScreen.app/Contents/Resources/AppIcon.icns" 2>/dev/null || true
           rm -rf "$ICONSET_DIR"
+
+          # 拷贝菜单栏图标资源：SPM 构建不编译 Assets.xcassets，发布 bundle 无 Assets.car，
+          # 运行时由 StatusBarIcon.loadMenuIcon 从 Resources 加载裸 png（缺失会回落系统符号）
+          cp "SwallowScreen/Assets.xcassets/MenuIcon.imageset/menu_icon.png" "SwallowScreen.app/Contents/Resources/" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/MenuIcon.imageset/menu_icon@2x.png" "SwallowScreen.app/Contents/Resources/" 2>/dev/null || true
+          cp "SwallowScreen/Assets.xcassets/MenuIcon.imageset/menu_icon@3x.png" "SwallowScreen.app/Contents/Resources/" 2>/dev/null || true
           
           # 获取版本号
           VERSION=${GITHUB_REF#refs/tags/v}
