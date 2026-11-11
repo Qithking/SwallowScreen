@@ -351,13 +351,26 @@ struct AppPopoverView: View {
                 checkForUpdate()
             }) {
                 HStack(spacing: 4) {
-                    if isCheckingUpdate {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                    } else {
-                        Image(systemName: updateStatus == .available ? "arrow.down.circle.fill" : "arrow.clockwise")
+                    // 图标槽固定尺寸：ProgressView 与 SF Symbol 固有布局尺寸不同
+                    //（scaleEffect 只缩放视觉不缩放布局），不固定会导致加载态行高变化、挤压上方列表区
+                    ZStack {
+                        if isCheckingUpdate {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                        } else {
+                            Image(systemName: updateStatus == .available ? "arrow.down.circle.fill" : "arrow.clockwise")
+                        }
                     }
-                    Text(updateButtonText)
+                    .frame(width: 16, height: 16)
+
+                    // 文本槽用全部状态文案做隐藏占位：各状态文案宽度不同，
+                    // 不预留会导致按钮宽度随状态变化、设置/退出按钮横向移位
+                    ZStack {
+                        ForEach(UpdateChecker.UpdateStatus.allCases, id: \.self) { status in
+                            Text(status.displayText).hidden()
+                        }
+                        Text(updateButtonText)
+                    }
                 }
             }
             .buttonStyle(ToolbarButtonStyle())

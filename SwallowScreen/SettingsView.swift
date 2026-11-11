@@ -119,6 +119,9 @@ struct GeneralSettingsView: View {
     // 开机启动失败时 UI 显示一行告警
     @State private var launchAtLoginError: String?
 
+    // 辅助功能授权状态本地镜像：onAppear / 应用回前台时从 WindowMover 刷新
+    @State private var hasAccessibilityPermission = false
+
     private var settings: AppSettings? { appSettings.first }
 
     var body: some View {
@@ -188,6 +191,28 @@ struct GeneralSettingsView: View {
                     }
                 }
 
+                Divider()
+                    .padding(.leading, 44)
+
+                // 辅助功能权限：搬窗核心能力依赖此权限，未授权时提供手动触发授权入口
+                SettingsRow(
+                    icon: "lock.shield.fill",
+                    iconColor: .orange,
+                    title: "辅助功能权限",
+                    subtitle: hasAccessibilityPermission ? "已授权，可正常搬动窗口" : "未授权，无法自动搬动窗口"
+                ) {
+                    if hasAccessibilityPermission {
+                        Text("已授权")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Button("去授权") {
+                            requestAccessibility()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+
                 SettingsSectionHeader(title: "更新")
                 SettingsRow(
                     icon: "network.circle.fill",
@@ -232,6 +257,24 @@ struct GeneralSettingsView: View {
         }
         .onAppear {
             ensureSettingsExists()
+            refreshAccessibilityPermission()
+        }
+        // 用户在系统设置完成授权切回应用时，刷新授权状态显示
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshAccessibilityPermission()
+        }
+    }
+
+    // 刷新辅助功能授权状态本地镜像（WindowMover.shared 未创建时直接查系统状态兜底）
+    private func refreshAccessibilityPermission() {
+        hasAccessibilityPermission = WindowMover.shared?.checkAccessibilityPermission() ?? AXIsProcessTrusted()
+    }
+
+    // 与 AppDelegate 权限轮询超时行为一致：弹系统授权提示框并直接打开辅助功能设置页
+    private func requestAccessibility() {
+        WindowMover.shared?.requestAccessibilityPermission()
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
     }
 

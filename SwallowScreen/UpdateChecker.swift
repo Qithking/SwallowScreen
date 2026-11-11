@@ -25,7 +25,8 @@ final class UpdateChecker {
     }
 
     /// 5 个 case 对应 UI 状态机：未检查 / 检查中 / 有更新 / 已是最新 / 检查失败
-    enum UpdateStatus {
+    /// CaseIterable：AppPopoverView 文本槽用全部状态文案做隐藏占位（宽度预留单一来源）
+    enum UpdateStatus: CaseIterable {
         case idle
         case checking
         case available
