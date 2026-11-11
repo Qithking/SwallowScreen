@@ -367,15 +367,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// 启动权限检查定时器；30s 未授权则停止轮询，避免无限循环
+    /// 启动权限检查定时器；30s 未授权则打开系统设置引导一次，并降为 5s 低频轮询持续等待
     /// 用 DispatchSourceTimer，避免被主 RunLoop 的 tracking mode 阻塞
     private func startPermissionCheckTimer() {
         permissionCheckTimer?.cancel()
+        startPermissionPolling(interval: 1.0, deadline: .now() + 1.0)
+    }
 
-        let permissionCheckStart = Date()
-        let maxPermissionCheckDuration: TimeInterval = 30.0
+    /// 权限轮询：1s 间隔等 30s；超时打开系统设置引导一次后降为 5s 间隔持续等待。
+    /// 授权完成后走既有恢复路径（stopMonitoring + setupWindowMover 重建搬移链路）。
+    /// 修复：旧实现 30s 超时后直接取消轮询，后置授权（启动 30s 后才在系统设置
+    /// 完成授权）无任何机制响应，搬移链路保持未启动，必须重启应用才生效
+    private func startPermissionPolling(interval: TimeInterval, deadline: DispatchTime) {
+        let start = Date()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 1.0, repeating: 1.0)
+        timer.schedule(deadline: deadline, repeating: interval)
         timer.setEventHandler { [weak self] in
             guard let self = self else {
                 timer.cancel()
@@ -389,14 +395,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.setupWindowMover()
                 return
             }
-            if Date().timeIntervalSince(permissionCheckStart) > maxPermissionCheckDuration {
-                timer.cancel()
-                self.permissionCheckTimer = nil
-                os_log("辅助功能权限 30s 内未授予，停止轮询。请在 系统设置 → 隐私与安全 → 辅助功能 中手动开启 SwallowScreen。", log: OSLog.default, type: .error)
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                    NSWorkspace.shared.open(url)
-                }
+            // 低频轮询阶段：静默等待授权，不再重复引导
+            guard interval < 5.0, Date().timeIntervalSince(start) > 30.0 else { return }
+            // 快速轮询超时：引导打开系统设置一次，降频为 5s 持续等待授权
+            timer.cancel()
+            os_log("辅助功能权限 30s 内未授予，已打开系统设置；转为 5s 低频轮询，授权后自动生效。", log: OSLog.default, type: .error)
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
             }
+            self.startPermissionPolling(interval: 5.0, deadline: .now() + 5.0)
         }
         timer.resume()
         permissionCheckTimer = timer
