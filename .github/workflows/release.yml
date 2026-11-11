@@ -1,4 +1,6 @@
-name: Release
+name: release
+# run-name：Actions 页签 run 列表的标题（默认取触发 commit 的提交信息，此处改为 release + 版本号）
+run-name: release ${{ github.ref_name }}
 
 on:
   push:
@@ -208,7 +210,7 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          name: release
+          name: ${{ github.ref_name }}  # Release 标题 = tag 版本号（如 v1.0.22），非固定 release
           body_path: release_body.txt
           files: SwallowScreen-*.dmg
           draft: false
