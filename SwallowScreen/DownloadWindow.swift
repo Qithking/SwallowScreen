@@ -375,34 +375,34 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
         let fileName = downloadTask.response?.suggestedFilename ?? location.lastPathComponent
         let destinationURL = tempDir.appendingPathComponent(fileName)
 
-        try? fileManager.removeItem(at: destinationURL)
+        do {
+            // 临时文件在 delegate 返回后即被系统删除，必须在返回前同步转移
+            // （同卷 rename 原子近似零耗时，不会阻塞主线程；此前后台 copyItem
+            //  必然晚于 delegate 返回执行，源文件已被系统回收导致"保存文件失败"）
+            try UpdateDownloadPersistence.persistDownloadedFile(at: location, to: destinationURL)
+        } catch {
+            os_log("保存下载文件失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
+            Task { @MainActor [weak self] in
+                self?.callbacks[urlKey]?.onError("保存文件失败: \(error.localizedDescription)")
+                self?.callbacks[urlKey] = nil
+                self?.activeTasks[urlKey] = nil
+            }
+            return
+        }
 
-        // 后台线程执行 copyItem，避免大文件阻塞主线程
-        let locationCopy = location
-        let urlKeyCapture = urlKey
         Task.detached(priority: .utility) {
-            do {
-                try FileManager.default.copyItem(at: locationCopy, to: destinationURL)
-                // 清理之前的旧更新下载文件（保留当前文件）
-                if let contents = try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
-                    for file in contents where file != destinationURL {
-                        try? FileManager.default.removeItem(at: file)
-                    }
+            // 清理之前的旧更新下载文件（保留当前文件）
+            if let contents = try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
+                for file in contents where file != destinationURL {
+                    try? FileManager.default.removeItem(at: file)
                 }
-                // 集中在同一个 MainActor.run：onComplete 与 callbacks/activeTasks 清理一起完成，
-                // 避免与 didCompleteWithError 的清理互相冲突
-                await MainActor.run { [weak self] in
-                    self?.callbacks[urlKeyCapture]?.onComplete(destinationURL)
-                    self?.callbacks[urlKeyCapture] = nil
-                    self?.activeTasks[urlKeyCapture] = nil
-                }
-            } catch {
-                os_log("保存下载文件失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
-                await MainActor.run { [weak self] in
-                    self?.callbacks[urlKeyCapture]?.onError("保存文件失败: \(error.localizedDescription)")
-                    self?.callbacks[urlKeyCapture] = nil
-                    self?.activeTasks[urlKeyCapture] = nil
-                }
+            }
+            // 集中在同一个 MainActor.run：onComplete 与 callbacks/activeTasks 清理一起完成，
+            // 避免与 didCompleteWithError 的清理互相冲突
+            await MainActor.run { [weak self] in
+                self?.callbacks[urlKey]?.onComplete(destinationURL)
+                self?.callbacks[urlKey] = nil
+                self?.activeTasks[urlKey] = nil
             }
         }
     }
