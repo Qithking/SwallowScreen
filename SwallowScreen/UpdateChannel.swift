@@ -29,4 +29,10 @@ public enum UpdateChannel: String, CaseIterable {
         }
         return Self.proxyPrefix + urlString
     }
+
+    /// 跨视图共用入口：按持久化的渠道 rawValue 解析下载地址。
+    /// 渠道脏数据（Store 老记录/手改）兜底官网渠道，URL 原样返回
+    public static func applyChannel(_ rawValue: String, to urlString: String) -> String {
+        UpdateChannel(rawValue: rawValue)?.resolveDownloadURL(urlString) ?? urlString
+    }
 }

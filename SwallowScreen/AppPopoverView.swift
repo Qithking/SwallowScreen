@@ -609,8 +609,7 @@ struct AppPopoverView: View {
     private func openDownloadWindow() {
         guard let url = URL(string: downloadURL) else { return }
         // 按设置的更新方式解析下载渠道：官网直连 / gh-proxy 加速（脏数据兜底官网）
-        let channel = UpdateChannel(rawValue: appSettings.first?.updateChannel ?? "") ?? .github
-        let resolved = URL(string: channel.resolveDownloadURL(url.absoluteString)) ?? url
+        let resolved = URL(string: UpdateChannel.applyChannel(appSettings.first?.updateChannel ?? "", to: url.absoluteString)) ?? url
         DownloadWindowController.open(version: latestVersion, downloadURL: resolved)
     }
 }

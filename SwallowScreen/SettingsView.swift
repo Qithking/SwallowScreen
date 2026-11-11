@@ -661,9 +661,11 @@ struct AboutView: View {
     
     private func openDownloadWindow() {
         guard let url = URL(string: downloadURL) else { return }
-        DownloadWindowController.open(version: latestVersion, downloadURL: url)
+        // 按设置的更新方式解析下载渠道：官网直连 / gh-proxy 加速（脏数据兜底官网）
+        let resolved = URL(string: UpdateChannel.applyChannel(appSettings.first?.updateChannel ?? "", to: url.absoluteString)) ?? url
+        DownloadWindowController.open(version: latestVersion, downloadURL: resolved)
     }
-    
+
     private func openGitHub() {
         if let url = URL(string: "https://github.com/Qithking/SwallowScreen") {
             NSWorkspace.shared.open(url)

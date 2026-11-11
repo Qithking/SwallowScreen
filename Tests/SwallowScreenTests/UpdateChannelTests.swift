@@ -51,4 +51,24 @@ final class UpdateChannelTests: XCTestCase {
         XCTAssertEqual(UpdateChannel(rawValue: "ghproxy"), .ghproxy)
         XCTAssertNil(UpdateChannel(rawValue: "unknown"))
     }
+
+    // MARK: - applyChannel（跨视图共用入口：设置 rawValue + 原生 URL → 渠道化地址）
+
+    // 官网渠道 rawValue：URL 原样返回
+    func testApplyChannelKeepsURLForOfficialRawValue() {
+        XCTAssertEqual(UpdateChannel.applyChannel("github", to: githubDMG), githubDMG)
+    }
+
+    // 加速渠道 rawValue：对 github.com 的 URL 加 gh-proxy 前缀
+    func testApplyChannelPrependsPrefixForProxyRawValue() {
+        XCTAssertEqual(
+            UpdateChannel.applyChannel("ghproxy", to: githubDMG),
+            "https://gh-proxy.com/" + githubDMG
+        )
+    }
+
+    // 脏数据 rawValue（Store 老记录/手改 plist）：兜底官网渠道，URL 原样返回
+    func testApplyChannelFallsBackToOfficialForInvalidRawValue() {
+        XCTAssertEqual(UpdateChannel.applyChannel("unknown", to: githubDMG), githubDMG)
+    }
 }
