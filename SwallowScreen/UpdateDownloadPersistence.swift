@@ -16,7 +16,9 @@ public enum UpdateDownloadPersistence {
     ///     （delegate 方法返回后系统即删除，必须在 delegate 内同步处理）
     ///   - destinationURL: 目标文件地址
     /// - Throws: 移动失败时抛出底层错误，由调用方决定如何呈现
-    public static func persistDownloadedFile(at location: URL, to destinationURL: URL) throws {
+    /// - Note: 显式 nonisolated——Xcode 工程默认隔离为 MainActor，隐式隔离会使
+    ///   URLSession delegate 的 nonisolated 回调无法同步调用（纯文件 IO 与线程无关）
+    public nonisolated static func persistDownloadedFile(at location: URL, to destinationURL: URL) throws {
         let fileManager = FileManager.default
         // 清理目标处可能的旧残留，避免 moveItem 因目标已存在而失败
         try? fileManager.removeItem(at: destinationURL)
