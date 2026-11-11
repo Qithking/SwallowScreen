@@ -27,7 +27,7 @@ let package = Package(
             name: "SwallowScreen",
             dependencies: ["SwallowScreenCore"],
             path: "SwallowScreen",
-            exclude: ["Assets.xcassets", "UpdateChannel.swift", "ScreenGeometry.swift", "PanelGeometry.swift", "StatusBarIcon.swift", "UpdateDownloadPersistence.swift"],
+            exclude: ["Assets.xcassets", "Info.plist", "UpdateChannel.swift", "ScreenGeometry.swift", "PanelGeometry.swift", "StatusBarIcon.swift", "UpdateDownloadPersistence.swift"],
             resources: [
                 .process("Assets.xcassets")
             ]

@@ -8,6 +8,11 @@
 import SwiftUI
 import AppKit
 import os.log
+// SPM 构建下 UpdateDownloadPersistence 位于 SwallowScreenCore 模块（SPM 自动定义 SWIFT_PACKAGE）；
+// Xcode 工程为平面 target 无需 import（与 AppSettings.swift 同模式）
+#if SWIFT_PACKAGE
+import SwallowScreenCore
+#endif
 
 // MARK: - 下载窗口控制器
 /// 单例 + 复用窗口，重复触发时聚焦已有窗口
