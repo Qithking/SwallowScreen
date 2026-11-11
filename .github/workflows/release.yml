@@ -1,6 +1,6 @@
 name: release
 # run-name：Actions 页签 run 列表的标题（默认取触发 commit 的提交信息，此处改为 release + 版本号）
-run-name: release ${{ github.ref_name }}
+run-name: release
 
 on:
   push:
