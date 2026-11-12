@@ -194,8 +194,27 @@ jobs:
       - name: Generate Release Body
         id: release_body
         run: |
-          # Release 正文不使用提交内容，仅保留安装说明与系统要求
+          CURRENT_TAG="${{ github.ref_name }}"
+          # 上一 tag：从当前 tag 沿历史回溯、排除自身；仓库无更早 tag（首次发布）时为空
+          PREV_TAG=$(git describe --tags --abbrev=0 --exclude="$CURRENT_TAG" "$CURRENT_TAG" 2>/dev/null || true)
+
+          # Release 正文 = 本次版本差异记录（上一 tag..当前 tag 的提交列表）+ 安装说明
           {
+            echo "### 本次更新内容"
+            echo ""
+            if [ -n "$PREV_TAG" ]; then
+              # 逐条列出差异提交：标题 + 短 hash
+              git log "$PREV_TAG..$CURRENT_TAG" --pretty=format:"- %s (%h)"
+            else
+              echo "首个 tag 发布，包含全部提交："
+              echo ""
+              git log --pretty=format:"- %s (%h)"
+            fi
+            echo ""
+          } > release_body.txt
+
+          {
+            echo ""
             echo "### 安装说明"
             echo "  1. 下载并打开 DMG 文件"
             echo "  2. 将 SwallowScreen.app 拖入 Applications 文件夹"
@@ -203,8 +222,8 @@ jobs:
             echo ""
             echo "### 系统要求"
             echo "  - macOS 14.0 (Sonoma) 或更高版本"
-          } > release_body.txt
-          
+          } >> release_body.txt
+
           cat release_body.txt
 
       - name: Upload to Release
