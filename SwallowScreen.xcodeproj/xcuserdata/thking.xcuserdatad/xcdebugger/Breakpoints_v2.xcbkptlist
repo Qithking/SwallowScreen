@@ -208,8 +208,8 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "412"
             endingLineNumber = "412"
-            landmarkName = "WindowMover"
-            landmarkType = "3">
+            landmarkName = "setupPinObserver(for:)"
+            landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
       <BreakpointProxy
@@ -224,7 +224,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2289"
             endingLineNumber = "2289"
-            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkName = "moveFrontWindowToAdjacentScreen(next:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -240,7 +240,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2295"
             endingLineNumber = "2295"
-            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkName = "moveFrontWindowToAdjacentScreen(next:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -256,7 +256,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2285"
             endingLineNumber = "2285"
-            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkName = "moveFrontWindowToAdjacentScreen(next:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -272,7 +272,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2305"
             endingLineNumber = "2305"
-            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkName = "moveFrontWindowToAdjacentScreen(next:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
@@ -288,7 +288,7 @@
             endingColumnNumber = "9223372036854775807"
             startingLineNumber = "2311"
             endingLineNumber = "2311"
-            landmarkName = "moveWindowToFrameImmediate(_:targetFrame:prebuiltSize:)"
+            landmarkName = "moveAppToScreen(bundleIdentifier:screenID:screenSerialNumber:titlePattern:)"
             landmarkType = "7">
          </BreakpointContent>
       </BreakpointProxy>
