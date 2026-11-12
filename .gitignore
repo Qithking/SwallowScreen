@@ -5,4 +5,7 @@
 .scratch/
 .claude/
 .vscode/
-SwallowScreen.xcodeproj/
+.screenshots/
+SwallowScreen.xcodeproj/xcuserdata/
+CONTEXT.md
+Package.resolved
