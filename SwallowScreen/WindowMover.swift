@@ -679,6 +679,8 @@ class WindowMover: ObservableObject {
             self.cooldowns.removeKeys { key in
                 key.hasPrefix("move:\(pidPrefix)") || key.hasPrefix("moving:\(pidPrefix)") || key.hasPrefix(pidPrefix)
             }
+            // pid → bundleID 反查缓存：进程退出后立即失效该 pid，防 pid 复用读到陈旧映射
+            self.pidToBundleCache.removeValue(forKey: pid)
         }
     }
     
@@ -941,17 +943,54 @@ class WindowMover: ObservableObject {
         return bestTitledBounds ?? bestUnconditionalBounds
     }
 
-    /// 一次性获取所有 on-screen 窗口并按 pid 分组，避免逐 App 调用 CGWindowListCopyWindowInfo
+    /// 一次 CGWindowList 调用的双维度窗口快照
+    private struct OnScreenWindowSnapshot {
+        /// pid → 候选窗口（有 title 全部 + 无 title 但 ≥50），按面积降序
+        var byPID: [pid_t: [CGRect]] = [:]
+        /// bundleID → (真实 owner pid, bounds)，按面积降序
+        /// 应用注册条目 pid 可能为 -1（nwjs 壳应用如 Synology Note Station：应用注册条目
+        /// 与真实窗口进程脱钩），但 CGWindowList 的 ownerPID 是真实窗口进程——
+        /// 用 NSRunningApplication(processIdentifier:) 反查其 bundleID 建立映射
+        var byBundleID: [String: [(pid: pid_t, bounds: CGRect)]] = [:]
+    }
+
+    /// pid → bundleID 反查缓存：避免每 100ms 轮询对每个窗口反复创建 NSRunningApplication
+    ///（AppKit 对象开销大，是 CPU 峰值主因）。pid 复用场景极少，缓存 miss 时才反查；
+    /// 进程退出后 NSRunningApplication(processIdentifier:) 返回 nil，缓存自动失效
+    private var pidToBundleCache: [pid_t: String] = [:]
+
+    /// 反查窗口 ownerPID 的 bundleID，带缓存（缓存 miss 才调用 AppKit）
+    /// 空串哨兵表示"该进程无 bundleID"，与 checkAndEnforcePinnedWindows 的缓存写入共用
+    private func bundleID(forPID pid: pid_t) -> String? {
+        if let cached = pidToBundleCache[pid] {
+            return cached.isEmpty ? nil : cached
+        }
+        // NSRunningApplication(processIdentifier:) 按 pid 实时查进程表，能命中
+        // runningApplications 枚举外的窗口进程（nwjs 壳应用的窗口真实进程）
+        let bid = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
+        if let bid = bid {
+            pidToBundleCache[pid] = bid
+        }
+        return bid
+    }
+
+    /// 进程退出/无窗口时清除缓存，防止 pid 复用后拿到陈旧 bundleID
+    private func clearPIDToBundleCache() {
+        pidToBundleCache.removeAll()
+    }
+
+    /// 一次性获取所有 on-screen 窗口并按 pid/bundleID 双维度分组，避免逐 App 调用 CGWindowListCopyWindowInfo
     /// 返回每 pid 所有候选窗口（有 title 全部 + 无 title 但 ≥50），按面积降序——
     /// 多窗口应用只取最大窗口会让小窗口不被轮询覆盖。过滤与 handlePinWindowCreated 的 ≥50 一致
-    private func fetchAllOnScreenWindowBounds() -> [pid_t: [CGRect]] {
+    private func fetchAllOnScreenWindowBounds() -> OnScreenWindowSnapshot {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return [:]
+            return OnScreenWindowSnapshot()
         }
 
         // pid → 候选窗口列表，收集后按面积降序（首个即旧逻辑中的"主窗口"）
         var candidates: [pid_t: [(bounds: CGRect, area: CGFloat)]] = [:]
+        var bundleCandidates: [String: [(pid: pid_t, bounds: CGRect, area: CGFloat)]] = [:]
 
         for window in windowList {
             guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t else { continue }
@@ -972,14 +1011,25 @@ class WindowMover: ObservableObject {
             // 有 title 的窗口全部收集；无 title 的需满足最小尺寸（过滤瞬时/辅助窗口）
             if hasTitle || (width >= 50 && height >= 50) {
                 candidates[ownerPID, default: []].append((bounds, area))
+                // 同一窗口顺带按 bundleID 归组（CGWindowList 字典无 bundleID key，
+                // 用 ownerPID 反查 NSRunningApplication 拿 bundleIdentifier，走缓存避免
+                // 每 100ms 轮询反复创建 AppKit 对象；不能预构建 runningApplications 映射——
+                // 窗口真实进程可能不在该枚举里，实时反查才能命中）
+                if let bid = bundleID(forPID: ownerPID) {
+                    bundleCandidates[bid, default: []].append((ownerPID, bounds, area))
+                }
             }
         }
 
-        var result: [pid_t: [CGRect]] = [:]
+        var snapshot = OnScreenWindowSnapshot()
         for (pid, list) in candidates {
-            result[pid] = list.sorted { $0.area > $1.area }.map { $0.bounds }
+            snapshot.byPID[pid] = list.sorted { $0.area > $1.area }.map { $0.bounds }
         }
-        return result
+        for (bid, list) in bundleCandidates {
+            // 面积降序：首个即主窗口，其 owner pid 即真实窗口进程（辅助进程无主窗口）
+            snapshot.byBundleID[bid] = list.sorted { $0.area > $1.area }.map { ($0.pid, $0.bounds) }
+        }
+        return snapshot
     }
 
     /// 在 AX 窗口列表中按 (position, size) 容差匹配，拿到与 CGWindowList 同一窗口对应的 AXUIElement
@@ -1468,7 +1518,7 @@ class WindowMover: ObservableObject {
             guard let pid = bundleIDToPid[appInfo.bundleIdentifier] else { continue }
 
             // 启动搬窗以面积最大的窗口（首个候选）为准，其余窗口由 100ms 轮询路径覆盖
-            if let bounds = allOnScreenWindows[pid]?.first {
+            if let bounds = allOnScreenWindows.byPID[pid]?.first {
                 if isBoundsInTargetFrame(bounds, targetFrame: resolved.visibleFrame) {
                     // 窗口已在目标屏幕——跳过
                     logger.debug("启动搬窗: 已在目标屏幕，跳过: bundleID=\(appInfo.bundleIdentifier, privacy: .public)")
@@ -1610,7 +1660,9 @@ class WindowMover: ObservableObject {
         trimWindowDictionariesIfNeeded()
 
         // 启动期内跳过 pinToScreen，避免与 moveAll 冲突
-        if isPerformingInitialMove { return }
+        if isPerformingInitialMove {
+            return
+        }
 
         // 没有任何 App 开启 pinToScreen 时，不进 checkWindowPosition 循环
         if cachedPinnedApps.isEmpty {
@@ -1618,15 +1670,6 @@ class WindowMover: ObservableObject {
         }
 
         // 屏幕列表由 ScreenManager 统一维护
-
-        // 一次性获取所有 running apps，避免循环内多次调用 runningApplications(withBundleIdentifier:)
-        let runningApps = NSWorkspace.shared.runningApplications
-        var runningAppByBundleID: [String: NSRunningApplication] = [:]
-        for app in runningApps {
-            if let bid = app.bundleIdentifier {
-                runningAppByBundleID[bid] = app
-            }
-        }
 
         let pinnedApps = cachedPinnedApps
         if pinnedApps.isEmpty {
@@ -1646,27 +1689,41 @@ class WindowMover: ObservableObject {
         // 一次性获取所有 on-screen 窗口，避免每个 App 单独调用 CGWindowListCopyWindowInfo
         let allOnScreenWindows = fetchAllOnScreenWindowBounds()
 
+        // bundleID → pid 直接取自 CGWindowList 窗口快照。macOS 27 上 NSWorkspace
+        // .runningApplications 每次返回全新 NSRunningApplication 实例，枚举+任何属性
+        // 访问（bundleIdentifier 静态、processIdentifier 动态）都触发同步 XPC（sample
+        // 三轮实证：枚举循环占 ~60% tick 时间，ObjectIdentifier 缓存因对象每轮重建
+        // 而失效），而窗口快照本就携带 pid+bundleID，零增量开销
+        var runningPIDByBundleID: [String: pid_t] = [:]
+        for (bid, windows) in allOnScreenWindows.byBundleID {
+            if let pid = windows.first?.pid, pid > 0 {
+                runningPIDByBundleID[bid] = pid
+            }
+        }
+
         for appInfo in pinnedApps {
             guard let resolved = screenManager.resolveTarget(for: appInfo) else {
                 setPinStatus(appInfo.bundleIdentifier, false)
                 continue
             }
 
-            guard let app = runningAppByBundleID[appInfo.bundleIdentifier] else {
-                // App 未运行：窗口不存在，视为不在位
+            // bundleID 有窗口快照即视为在位；pid 即窗口真实进程（CGWindowList owner，
+            // nwjs 壳应用等注册 pid 无效场景天然拿到真实窗口 pid，无需反查）
+            guard let pid = runningPIDByBundleID[appInfo.bundleIdentifier] else {
+                // App 未运行或无窗口：视为不在位
                 setPinStatus(appInfo.bundleIdentifier, false)
                 continue
             }
-
-            let pid = app.processIdentifier
             let windowID = "\(pid)-main"
 
             // 用户正在拖拽该窗口时跳过，等松手后再检查（状态保留旧值，松手后下一轮刷新）
-            if pendingDragCheckPids.contains(pid) { continue }
+            if pendingDragCheckPids.contains(pid) {
+                continue
+            }
 
             // 检查该 pid 的**所有**候选窗口（面积降序），不再只查面积最大的一个——
             // 多窗口应用（如 Windows App 会话窗+连接列表窗）中小窗口此前不被轮询覆盖
-            let windowBoundsList = allOnScreenWindows[pid] ?? []
+            let windowBoundsList = allOnScreenWindows.byPID[pid] ?? []
 
             // pin 状态可视化回传：主窗口（面积最大）中心在目标屏且重叠 ≥50% 视为在位
             if let mainBounds = windowBoundsList.first {
@@ -1687,7 +1744,7 @@ class WindowMover: ObservableObject {
         // 本轮扫到的存活 pids——previousWindowPositions 中其他 pid 前缀视为死键
         // 补充 didTerminateApplicationNotification 漏掉的边界（App 突然消失/异常退出路径）
         let alivePids: Set<pid_t> = Set(pinnedApps.compactMap {
-            runningAppByBundleID[$0.bundleIdentifier]?.processIdentifier
+            runningPIDByBundleID[$0.bundleIdentifier]
         })
         removeDeadKeys(forAlivePids: alivePids)
     }
@@ -1921,7 +1978,9 @@ class WindowMover: ObservableObject {
         }
 
         // 优先使用预计算的 bounds；兜底才走单点 CGWindowList 查询（供早期检测路径复用）
-        guard let bounds = prebuiltMainBounds ?? findOnScreenWindow(for: pid) else { return }
+        guard let bounds = prebuiltMainBounds ?? findOnScreenWindow(for: pid) else {
+            return
+        }
 
         // windowID 支持外部指定：轮询路径逐窗口检查时每窗口一个独立标识
         let windowID = windowKey ?? "\(pid)-main"
@@ -1937,10 +1996,14 @@ class WindowMover: ObservableObject {
         }
 
         // 冷却检查（外层已过滤，保留作为防御）
-        if cooldowns.isCoolingDown("move:\(windowID)") || cooldowns.isCoolingDown("moving:\(windowID)") { return }
+        if cooldowns.isCoolingDown("move:\(windowID)") || cooldowns.isCoolingDown("moving:\(windowID)") {
+            return
+        }
 
         // 通过 AX 获取窗口引用（只尝试一次，不遍历所有 AX 窗口）
-        guard let axWindows = AXWindowReader.windows(pid: pid) else { return }
+        guard let axWindows = AXWindowReader.windows(pid: pid) else {
+            return
+        }
 
         // 找位置最接近 CGWindowList 结果的 AX 窗口
         var bestWindow: AXUIElement? = nil
@@ -1956,7 +2019,9 @@ class WindowMover: ObservableObject {
             }
         }
 
-        guard let targetWindow = bestWindow else { return }
+        guard let targetWindow = bestWindow else {
+            return
+        }
 
         // 全屏窗口在独立 Space，AX kAXPositionAttribute 设置被系统忽略——
         // 方案 A：先退出全屏（退出后不自动重进），下一轮轮询以普通窗口身份搬回目标屏
