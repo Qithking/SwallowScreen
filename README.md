@@ -53,12 +53,16 @@
 
 |  图标 | 特性         | 说明                                 |
 | :-: | ---------- | ---------------------------------- |
-|  🎯 | **固定屏幕**   | 指定应用只能在特定屏幕移动，拖拽到其他屏幕时自动回弹         |
-| 🖥️ | **多屏幕支持**  | 为每个应用指定首选显示屏幕，跨屏操作可控               |
-|  ⌨️ | **全局快捷键**  | 一键固定 / 解除前台应用的屏幕归属                 |
-|  ✨  | **毛玻璃 UI** | 采用 SwiftUI + AppKit 现代化 macOS 设计语言 |
-|  🚀 | **开机自启**   | 支持登录时自动启动，常驻菜单栏                    |
-|  🔄 | **自动更新**   | 启动时自动检查并提示新版本                      |
+|  🎯 | **固定屏幕**   | 指定应用只能在特定屏幕移动，拖拽到其他屏幕时自动回弹；应用列表实时显示固定状态（在位 / 偏移 / 暂停） |
+| 🧲 | **启动即归位**  | 应用窗口首帧出现即被搬向目标屏幕，无闪动无迟滞；多窗口应用逐一管控 |
+| 🖥️ | **多屏幕支持**  | 为每个应用指定首选显示屏幕；显示器拔插后 pinned 窗口自动搬回 |
+| 🪟 | **全屏窗口处理** | 全屏窗口不在目标屏时自动退出全屏并搬移到位（不自动重进全屏） |
+| ⏸️ | **全局暂停**   | 一键暂停 / 恢复全部自动搬窗，设置开关与快捷键双入口 |
+|  ⌨️ | **全局快捷键**  | 固定 / 解除前台应用、焦点窗口跨屏移动、暂停 / 恢复 |
+|  ✨  | **毛玻璃 UI** | SwiftUI + AppKit 现代化 macOS 设计语言，主面板高度可拖拽调整 |
+|  🚀 | **开机自启**   | 支持登录时自动启动，常驻菜单栏 |
+|  🔄 | **自动更新**   | 启动时自动检查并提示新版本，支持 GitHub 官网 / 加速镜像双渠道 |
+| 💤 | **轻量常驻**   | 空闲 CPU 占用 <5%，事件驱动 + 低频轮询混合架构 |
 |  💾 | **本地持久化**  | 配置基于 SwiftData 本地存储，隐私友好           |
 
 ## 🖼️ 界面预览
@@ -89,8 +93,11 @@
 | ----------- | ------------ |
 | `⌘ + ⇧ + 1` | 将前台应用固定到当前屏幕 |
 | `⌘ + ⇧ + 2` | 取消前台应用的屏幕固定  |
+| `⌘ + ⇧ + ←` | 将焦点窗口移动到上一块屏幕 |
+| `⌘ + ⇧ + →` | 将焦点窗口移动到下一块屏幕 |
+| `⌘ + ⇧ + P` | 暂停 / 恢复全部自动搬窗 |
 
-> 💡 快捷键可在「设置」中自定义，支持 `⌘ / ⌥ / ⇧ / ⌃` 的任意组合。
+> 💡 固定 / 取消固定快捷键可在「设置」中自定义，支持 `⌘ / ⌥ / ⇧ / ⌃` 的任意组合；跨屏移动与全局暂停为固定组合键。
 
 ## ⚙️ 辅助功能权限
 
@@ -126,7 +133,7 @@ swift build -c release
 # 运行
 ./.build/release/SwallowScreen
 
-# 单元测试（屏幕几何 / 更新渠道）
+# 单元测试（屏幕几何 / 面板尺寸 / 更新渠道 / 状态栏图标）
 swift test
 ```
 
@@ -147,18 +154,21 @@ xcodebuild -project SwallowScreen.xcodeproj \
 ```text
 SwallowScreen/
 ├── SwallowScreenApp.swift      # @main 应用入口
-├── AppDelegate.swift            # 托盘、菜单、全局快捷键
-├── AppPopoverView.swift         # 托盘弹出主界面
-├── SettingsView.swift           # 设置窗口视图
+├── AppDelegate.swift            # 托盘、菜单、全局快捷键、主面板窗口
+├── AppPopoverView.swift         # 主面板界面（高度可拖拽调整）
+├── SettingsView.swift           # 设置窗口视图（侧边栏导航）
 ├── DownloadWindow.swift         # 版本更新下载进度窗口
 ├── UpdateChecker.swift          # 自动更新检测服务
 ├── UpdateChannel.swift          # 更新渠道（GitHub 官网 / 加速镜像）
+├── UpdateDownloadPersistence.swift # 更新下载状态持久化
 ├── RelaunchManager.swift        # 自更新安装与重启
 ├── AppManager.swift             # 系统应用列表与运行状态
 ├── ScreenManager.swift          # 显示器接入、变更监听与目标屏解析
 ├── WindowMover.swift            # 窗口移动与回弹核心逻辑
 ├── AXWindowReader.swift         # Accessibility API 类型化读取封装
 ├── CooldownRegistry.swift       # 冷却/守卫任务统一注册表
+├── PanelGeometry.swift          # 主面板尺寸纯函数
+├── StatusBarIcon.swift          # 菜单栏图标模板渲染
 ├── ScreenGeometry.swift         # 屏幕几何纯函数（SwallowScreenCore）
 ├── VisualEffectView.swift       # 毛玻璃背景组件
 ├── AppInfo.swift                # 应用配置数据模型
@@ -167,8 +177,12 @@ SwallowScreen/
 └── Assets.xcassets/             # 图标与颜色资源
 
 Tests/SwallowScreenTests/       # 单元测试（swift test）
-├── ScreenGeometryTests.swift    # 屏幕几何纯函数测试
-└── UpdateChannelTests.swift     # 更新渠道测试
+├── ScreenGeometryTests.swift    # 屏幕几何测试
+├── PanelGeometryTests.swift     # 面板尺寸测试
+├── UpdateChannelTests.swift     # 更新渠道测试
+├── UpdateDownloadPersistenceTests.swift # 下载持久化测试
+├── StatusBarIconTests.swift     # 状态栏图标测试
+└── UpdateMenuIconTemplateTests.swift    # 菜单图标模板测试
 ```
 
 ## 🛠️ 技术栈
@@ -198,7 +212,7 @@ Tests/SwallowScreenTests/       # 单元测试（swift test）
 <details>
 <summary><b>Q3：能否控制全屏（原生全屏 / Split View）应用？</b></summary>
 
-macOS 对全屏窗口的跨屏控制存在系统级限制，SwallowScreen 仅能对普通窗口生效。建议对需要固定的应用使用「最大化」而非「全屏」。
+可以。SwallowScreen 检测到全屏窗口不在目标屏时，会自动将其退出全屏并搬到目标屏（不会自动重新进入全屏）。macOS 对全屏窗口的跨屏直接移动存在系统级限制，因此采用「先退出全屏、再搬移」的策略；如需保持全屏，可在窗口到位后手动重新全屏。
 
 </details>
 
