@@ -256,7 +256,7 @@ Tests/SwallowScreenTests/       # 单元测试（swift test）
 
 ## 📄 License
 
-本项目基于 [GPL-3.0 License](LICENSE) 开源。
+本项目基于 [AGPL-3.0 License](LICENSE) 开源。
 Copyright © 2024 Qithking & SwallowScreen Contributors.
 
 ***
