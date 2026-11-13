@@ -8,6 +8,11 @@
 import Foundation
 import AppKit
 import os.log
+// SPM 构建下 RelaunchScriptFactory 位于 SwallowScreenCore 模块（SPM 自动定义 SWIFT_PACKAGE）；
+// Xcode 工程为平面 target 无需 import（与 DownloadWindow.swift 同模式）
+#if SWIFT_PACKAGE
+import SwallowScreenCore
+#endif
 
 @MainActor
 final class RelaunchManager {
@@ -17,9 +22,28 @@ final class RelaunchManager {
 
     private init() {}
 
+    /// 更新文件缺失时的用户提示
+    private func showUpdateFileMissingAlert(path: String) {
+        let alert = NSAlert()
+        alert.messageText = "无法安装更新"
+        alert.informativeText = "更新文件不存在或已被清理：\n\(path)\n\n请重新检查更新并下载。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }
+
     /// 安装新版本并重启应用
     /// - Parameter downloadURL: 下载文件（.dmg 或 .zip）的本地 URL
     func installAndRelaunch(from downloadURL: URL) {
+        // 预检：更新文件必须存在——缺失时弹窗告知，静默退出会让用户困惑
+        // （bug-58：曾出现脚本引用已被清理的 DMG、点击后应用无声退出）
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: downloadURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            showUpdateFileMissingAlert(path: downloadURL.path)
+            return
+        }
+
         let currentAppURL = Bundle.main.bundleURL
         let currentPID = ProcessInfo.processInfo.processIdentifier
         let fileExtension = downloadURL.pathExtension.lowercased()
@@ -35,19 +59,27 @@ final class RelaunchManager {
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("SwallowScreen_update_\(UUID().uuidString).sh")
 
+        // 日志与下载文件同目录，安装失败时便于取证
+        let logPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SwallowScreenUpdates")
+            .appendingPathComponent("relaunch.log")
+            .path
+
         let scriptContent: String
         switch fileExtension {
         case "dmg":
-            scriptContent = makeDMGScript(
+            scriptContent = RelaunchScriptFactory.makeDMGScript(
                 pid: currentPID,
                 dmgPath: downloadURL.path,
-                targetAppPath: targetAppURL.path
+                targetAppPath: targetAppURL.path,
+                logPath: logPath
             )
         case "zip":
-            scriptContent = makeZipScript(
+            scriptContent = RelaunchScriptFactory.makeZipScript(
                 pid: currentPID,
                 zipPath: downloadURL.path,
-                targetAppPath: targetAppURL.path
+                targetAppPath: targetAppURL.path,
+                logPath: logPath
             )
         default:
             // 不支持的格式，降级为直接打开文件
@@ -82,108 +114,5 @@ final class RelaunchManager {
         // 退出当前应用，脚本会在进程退出后完成安装和重启
         NSApplication.shared.terminate(nil)
     }
-
-    // MARK: - 脚本生成
-
-    /// 生成 DMG 格式的安装重启脚本
-    private func makeDMGScript(pid: Int32, dmgPath: String, targetAppPath: String) -> String {
-        """
-        #!/bin/bash
-        # 等待当前进程退出
-        while kill -0 \(pid) 2>/dev/null; do
-            sleep 0.5
-        done
-
-        # 挂载 DMG（-nobrowse 避免在 Finder 侧边栏显示）
-        MOUNT_OUTPUT=$(hdiutil attach "\(dmgPath)" -nobrowse -noverify -noautoopen 2>&1)
-        MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | tail -1 | awk '{print $NF}')
-
-        if [ -z "$MOUNT_POINT" ]; then
-            echo "挂载 DMG 失败" >&2
-            exit 1
-        fi
-
-        # 查找 .app
-        APP_PATH=$(find "$MOUNT_POINT" -maxdepth 1 -name "*.app" -type d | head -1)
-
-        if [ -z "$APP_PATH" ]; then
-            hdiutil detach "$MOUNT_POINT" -quiet
-            echo "DMG 中未找到 .app" >&2
-            exit 1
-        fi
-
-        # 先复制到临时名，复制成功后再原子替换——
-        # 避免 rm 后 cp 失败（磁盘满/权限）导致应用丢失且无法恢复
-        rm -rf "\(targetAppPath).new" "\(targetAppPath).old"
-        cp -R "$APP_PATH" "\(targetAppPath).new"
-        if [ $? -ne 0 ]; then
-            hdiutil detach "$MOUNT_POINT" -quiet
-            rm -rf "\(targetAppPath).new"
-            echo "复制新版本失败，已保留旧版本" >&2
-            exit 1
-        fi
-
-        # 同卷 rename 原子替换，旧版本暂存 .old，新版本就位后再删除
-        mv "\(targetAppPath)" "\(targetAppPath).old" 2>/dev/null
-        mv "\(targetAppPath).new" "\(targetAppPath)"
-        rm -rf "\(targetAppPath).old"
-
-        # 卸载 DMG
-        hdiutil detach "$MOUNT_POINT" -quiet
-
-        # 启动新版本
-        open "\(targetAppPath)"
-
-        # 清理脚本自身
-        rm -f "$0"
-        """
-    }
-
-    /// 生成 ZIP 格式的安装重启脚本
-    private func makeZipScript(pid: Int32, zipPath: String, targetAppPath: String) -> String {
-        """
-        #!/bin/bash
-        # 等待当前进程退出
-        while kill -0 \(pid) 2>/dev/null; do
-            sleep 0.5
-        done
-
-        # 解压 ZIP 到临时目录
-        TMP_DIR=$(mktemp -d)
-        unzip -q "\(zipPath)" -d "$TMP_DIR"
-
-        # 查找 .app
-        APP_PATH=$(find "$TMP_DIR" -name "*.app" -type d | head -1)
-
-        if [ -z "$APP_PATH" ]; then
-            rm -rf "$TMP_DIR"
-            echo "ZIP 中未找到 .app" >&2
-            exit 1
-        fi
-
-        # 先复制到临时名，复制成功后再原子替换——
-        # 避免 rm 后 cp 失败（磁盘满/权限）导致应用丢失且无法恢复
-        rm -rf "\(targetAppPath).new" "\(targetAppPath).old"
-        cp -R "$APP_PATH" "\(targetAppPath).new"
-        if [ $? -ne 0 ]; then
-            rm -rf "\(targetAppPath).new" "$TMP_DIR"
-            echo "复制新版本失败，已保留旧版本" >&2
-            exit 1
-        fi
-
-        # 同卷 rename 原子替换，旧版本暂存 .old，新版本就位后再删除
-        mv "\(targetAppPath)" "\(targetAppPath).old" 2>/dev/null
-        mv "\(targetAppPath).new" "\(targetAppPath)"
-        rm -rf "\(targetAppPath).old"
-
-        # 清理临时目录
-        rm -rf "$TMP_DIR"
-
-        # 启动新版本
-        open "\(targetAppPath)"
-
-        # 清理脚本自身
-        rm -f "$0"
-        """
-    }
 }
+
