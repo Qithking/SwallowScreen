@@ -137,6 +137,9 @@ class WindowMover: ObservableObject {
         // 显式 cancel 顶层 dispatch timer；之前漏 cancel 导致 ARC 释放时
         // dispatch source 仍持引用直到 timer 触发或手动 cancel
         self.timer?.cancel()
+        // 启动搬窗任务同样 cancel:任务体一旦进入方法执行会强持有 self,
+        // 实例 deinit 被推迟到方法返回——不 cancel 则退出时剩余应用仍被搬完
+        self.moveAllAppsTask?.cancel()
         if let token = appLaunchObserverToken {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
         }
@@ -1451,6 +1454,9 @@ class WindowMover: ObservableObject {
         // task 句柄保存到 moveAllAppsTask，stopMonitoring 中可取消
         moveAllAppsTask = Task { @MainActor [weak self] in
             await self?.moveAllOpenAppsToAssignedScreens()
+            // 取消路径:句柄与标志已由 stop/start 清理;此处若再置 nil,
+            // 会覆盖 stop→start 间隙新建任务的句柄,使其再次失去取消能力
+            guard !Task.isCancelled else { return }
             self?.isPerformingInitialMove = false
             self?.moveAllAppsTask = nil
         }
@@ -1505,6 +1511,9 @@ class WindowMover: ObservableObject {
         var processedInBatch = 0
 
         for appInfo in allApps {
+            // Task.cancel 只是协作信号,循环体必须显式检查才会真正停止:
+            // stopMonitoring/startMonitoring 取消后立即退出,避免旧任务继续搬窗
+            if Task.isCancelled { break }
             // 只有启用状态且设置了目标屏幕才处理
             guard appInfo.isEnabled else { continue }
             guard appInfo.targetScreenID != nil || appInfo.targetScreenSerialNumber != nil || appInfo.targetScreenName != nil else { continue }

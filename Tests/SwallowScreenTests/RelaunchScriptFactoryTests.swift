@@ -153,6 +153,47 @@ final class RelaunchScriptFactoryTests: XCTestCase {
             XCTAssertTrue(script.contains("sleep 1"), "\(label) 重试之间必须间隔 1s")
         }
     }
+
+    // MARK: - 契约：mv 两步替换必须各自带错误守卫
+    // （mv② 失败后无条件 rm -rf .old 会删掉唯一旧版本备份，应用丢失且无法恢复）
+
+    func testReplaceSectionGuardsBothMvStepsAndKeepsRollback() throws {
+        let zipScript = RelaunchScriptFactory.makeZipScript(
+            pid: 1234, zipPath: zipPath, targetAppPath: targetAppPath, logPath: logPath
+        )
+        let dmgScript = RelaunchScriptFactory.makeDMGScript(
+            pid: 1234, dmgPath: dmgPath, targetAppPath: targetAppPath, logPath: logPath
+        )
+        for (script, label) in [(zipScript, "ZIP"), (dmgScript, "DMG")] {
+            // 第一步 mv（改名暂存 .old）必须有守卫——失败时 target 原样保留
+            let firstMv = try XCTSourceLocation(
+                offsetOf: "mv \"\(targetAppPath)\" \"\(targetAppPath).old\"", in: script
+            )
+            let firstGuard = try XCTSourceLocation(offsetOf: "旧版本改名失败", in: script)
+            XCTAssertLessThan(firstMv, firstGuard, "\(label) 第一步 mv 必须有错误守卫")
+
+            // 第二步 mv（.new 就位）必须有守卫，且失败路径先移回 .old 恢复旧版本
+            let secondMv = try XCTSourceLocation(
+                offsetOf: "mv \"\(targetAppPath).new\" \"\(targetAppPath)\"", in: script
+            )
+            let restoreMv = try XCTSourceLocation(
+                offsetOf: "mv \"\(targetAppPath).old\" \"\(targetAppPath)\"", in: script
+            )
+            XCTAssertLessThan(firstGuard, secondMv, "\(label) 第二步 mv 必须在第一步守卫之后")
+            XCTAssertLessThan(
+                secondMv, restoreMv, "\(label) 第二步 mv 失败必须先移回 .old 恢复旧版本"
+            )
+
+            // rm -rf ".old"（独立一行，不含 .new 的开头清理行）必须在恢复路径之后——
+            // 任何失败分支都不得触达删除 .old 的语句
+            let finalRm = try XCTSourceLocation(
+                offsetOf: "rm -rf \"\(targetAppPath).old\"", in: script
+            )
+            XCTAssertLessThan(
+                restoreMv, finalRm, "\(label) 删除 .old 必须仅在两步 mv 均成功的路径上"
+            )
+        }
+    }
 }
 
 /// 辅助：在字符串中定位子串偏移（比 range 转换更直观）

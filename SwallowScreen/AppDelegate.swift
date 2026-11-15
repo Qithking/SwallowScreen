@@ -35,6 +35,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var closePanelObserverToken: Any?
     // 点击面板外（其他应用）关闭面板的全局鼠标监听，模拟 NSPopover.transient 行为
     private var outsideClickMonitor: Any?
+    // 面板因 resign key 自动隐藏的单调钟时刻:toggle 用它区分
+    // "本次点击引发的自动隐藏"(不重弹)与真正的关闭态(正常打开)
+    private var appPanelAutoHiddenAt: TimeInterval = 0
 
     // AppManager/ScreenManager 由 AppDelegate 持有，避免每次面板重建时重新扫描目录、重建图标缓存（峰值 +2-4MB 内存抖动）
     let appManager = AppManager()
@@ -294,9 +297,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func toggleAppWindow() {
         if let panel = appPanel, panel.isVisible {
             hideAppPanel()
-        } else {
-            showAppPanel()
+            return
         }
+        // 点击状态栏按钮先使面板 resign key → windowDidResignKey 自动 orderOut,
+        // 随后的 toggle 读到 isVisible=false 会误判为"想打开"重新弹出,面板关不掉;
+        // 刚自动隐藏的短窗内视为本次点击已完成关闭,不再弹出
+        if ProcessInfo.processInfo.systemUptime - appPanelAutoHiddenAt < 0.3 { return }
+        showAppPanel()
     }
     
     private func setupScreenChangeObserver() {
@@ -864,6 +871,9 @@ extension AppDelegate {
         // 点击本应用其他窗口（如设置窗口）时面板失焦即收起；
         // orderOut 触发的二次 resignKey 由 hideAppPanel 的 isVisible 守卫拦截
         guard let window = notification.object as? NSWindow, window == appPanel else { return }
+        // 记录自动隐藏时刻(单调钟):本次点击状态栏按钮引发的 resignKey 会让
+        // 随后的 toggleAppWindow 读到不可见面板,靠此时间戳拦住误重弹
+        appPanelAutoHiddenAt = ProcessInfo.processInfo.systemUptime
         hideAppPanel()
     }
 

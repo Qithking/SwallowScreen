@@ -453,8 +453,10 @@ struct HotkeySettingsView: View {
         // recordingHotkey == nil 时绝不安装 monitor
         guard recordingHotkey != nil else { return }
 
-        // HotkeySettingsView 是 struct，weak 不适用；
-        // localMonitor 在 stopRecording() / startRecording() 入口被替换，旧 monitor 引用自动释放
+        // NSEvent monitor 由系统持有,不随 Swift 引用释放,必须显式 removeMonitor:
+        // 录制中途切换目标(recordingHotkey 非 nil → 非 nil)会再次进入本方法,
+        // 直接覆盖引用不移除会使旧 monitor 泄漏,永久吞 keyDown 直至重启
+        stopRecording()
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let keyCode = UInt32(event.keyCode)
             var flags: UInt32 = 0

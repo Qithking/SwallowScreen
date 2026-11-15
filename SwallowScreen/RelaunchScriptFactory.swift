@@ -181,8 +181,27 @@ public enum RelaunchScriptFactory {
         log "新版本复制完成"
 
         # 同卷 rename 原子替换，旧版本暂存 .old，新版本就位后删除
-        mv "\(targetAppPath)" "\(targetAppPath).old" 2>/dev/null
-        mv "\(targetAppPath).new" "\(targetAppPath)"
+        mv "\(targetAppPath)" "\(targetAppPath).old" 2>>"$LOG_FILE"
+        if [ $? -ne 0 ]; then
+            # 第一步失败时 target 未动，清掉 .new 即可，原版本完好
+            \(rollbackCleanup)
+            rm -rf "\(targetAppPath).new"
+            log "旧版本改名失败，已保留原版本"
+            exit 1
+        fi
+        mv "\(targetAppPath).new" "\(targetAppPath)" 2>>"$LOG_FILE"
+        if [ $? -ne 0 ]; then
+            # 第二步失败时 target 已移到 .old：先移回恢复旧版本，
+            # 即使恢复也失败也绝不删除 .old——它是唯一的完整旧版本
+            mv "\(targetAppPath).old" "\(targetAppPath)" 2>>"$LOG_FILE"
+            if [ $? -eq 0 ]; then
+                log "新版本替换失败，已恢复旧版本（新版本暂存于 \(targetAppPath).new）"
+            else
+                log "新版本替换失败且恢复失败——完整旧版本暂存在 \(targetAppPath).old，请手动移回"
+            fi
+            \(rollbackCleanup)
+            exit 1
+        fi
         rm -rf "\(targetAppPath).old"
         log "应用替换完成"
         """
