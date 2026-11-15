@@ -118,6 +118,13 @@ struct GeneralSettingsView: View {
 
     // 开机启动失败时 UI 显示一行告警
     @State private var launchAtLoginError: String?
+    // 开机启动注册/注销失败的回滚标志：抑制回滚引发的 onChange 再次调用系统 API
+    @State private var isRollingBackLaunch = false
+
+    // 暂停开关切换失败时 UI 显示一行告警（WindowMover 未就绪）
+    @State private var pauseError: String?
+    // 暂停开关回滚标志：抑制回滚引发的 onChange 重复处理
+    @State private var suppressPauseChange = false
 
     // 辅助功能授权状态本地镜像：onAppear / 应用回前台时从 WindowMover 刷新
     @State private var hasAccessibilityPermission = false
@@ -138,9 +145,20 @@ struct GeneralSettingsView: View {
                         @Bindable var bindable = s
                         Toggle("", isOn: $bindable.launchAtLogin)
                             .labelsHidden()
-                            .onChange(of: s.launchAtLogin) { _, newValue in
-                                markUpdated()
-                                setLaunchAtLogin(enabled: newValue)
+                            .onChange(of: s.launchAtLogin) { oldValue, newValue in
+                                // 回滚引发的值变化不再调用系统 API（否则 register↔unregister 失败会来回循环）
+                                if isRollingBackLaunch {
+                                    isRollingBackLaunch = false
+                                    return
+                                }
+                                // 仅注册/注销成功才写 updatedAt——失败时磁盘不留错误值
+                                if setLaunchAtLogin(enabled: newValue) {
+                                    markUpdated()
+                                } else {
+                                    // 注册/注销失败回滚 model 与 Toggle，保持 UI 与系统实际状态一致
+                                    isRollingBackLaunch = true
+                                    s.launchAtLogin = oldValue
+                                }
                             }
                     }
                 }
@@ -184,11 +202,31 @@ struct GeneralSettingsView: View {
                         @Bindable var bindable = s
                         Toggle("", isOn: $bindable.isPaused)
                             .labelsHidden()
-                            .onChange(of: s.isPaused) { _, newValue in
-                                markUpdated()
-                                WindowMover.shared?.setPaused(newValue)
+                            .onChange(of: s.isPaused) { oldValue, newValue in
+                                if suppressPauseChange {
+                                    suppressPauseChange = false
+                                    return
+                                }
+                                if let mover = WindowMover.shared {
+                                    markUpdated()
+                                    mover.setPaused(newValue)
+                                } else {
+                                    // 启动 1s 内 WindowMover 尚未就绪：切换会静默无效，
+                                    // 回滚 Toggle 并提示（否则开关显示已暂停但实际未生效）
+                                    os_log("暂停窗口管理失败：WindowMover 未就绪", log: settingsLog, type: .error)
+                                    pauseError = "窗口管理尚未就绪，请稍后再试"
+                                    suppressPauseChange = true
+                                    s.isPaused = oldValue
+                                }
                             }
                     }
+                }
+                if let error = pauseError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 8)
                 }
 
                 Divider()
@@ -298,7 +336,9 @@ struct GeneralSettingsView: View {
         try? modelContext.save()
     }
 
-    private func setLaunchAtLogin(enabled: Bool) {
+    /// 设置开机启动。返回是否成功；失败时 UI 由 onChange 回滚，保持 Toggle 与系统实际状态一致
+    @discardableResult
+    private func setLaunchAtLogin(enabled: Bool) -> Bool {
         if #available(macOS 13.0, *) {
             do {
                 if enabled {
@@ -307,13 +347,16 @@ struct GeneralSettingsView: View {
                     try SMAppService.mainApp.unregister()
                 }
                 launchAtLoginError = nil
+                return true
             } catch {
                 os_log("设置开机启动失败: %{public}@", log: settingsLog, type: .error, error.localizedDescription)
                 launchAtLoginError = "开机启动设置失败：\(error.localizedDescription)"
+                return false
             }
         } else {
             // 老系统不支持 SMAppService
             launchAtLoginError = "当前 macOS 版本不支持开机启动设置"
+            return false
         }
     }
 }
@@ -334,9 +377,7 @@ struct HotkeySettingsView: View {
     @State private var recordingDeadline: Date = .distantPast
     // 用 DispatchSourceTimer，不被主 RunLoop tracking mode 阻塞
     @State private var recordingTimeoutTimer: DispatchSourceTimer?
-    // 加载设置期间的标志，防止 onChange 在 loadSettings 时误触发 saveHotkey
-    @State private var isLoadingSettings: Bool = false
-    
+
     enum ModifierKey: String, CaseIterable, Hashable {
         case command = "⌘"
         case shift = "⇧"
@@ -362,8 +403,8 @@ struct HotkeySettingsView: View {
                     isRecording: recordingHotkey == .setScreen,
                     onStartRecording: { recordingHotkey = .setScreen }
                 )
-                .onChange(of: setScreenModifiers) { _, _ in if !isLoadingSettings { saveHotkey(.setScreen) } }
-                .onChange(of: setScreenKeyCode) { _, _ in if !isLoadingSettings { saveHotkey(.setScreen) } }
+                .onChange(of: setScreenModifiers) { _, _ in saveHotkey(.setScreen) }
+                .onChange(of: setScreenKeyCode) { _, _ in saveHotkey(.setScreen) }
 
                 Divider()
                     .padding(.leading, 20)
@@ -376,8 +417,8 @@ struct HotkeySettingsView: View {
                     isRecording: recordingHotkey == .clearScreen,
                     onStartRecording: { recordingHotkey = .clearScreen }
                 )
-                .onChange(of: clearScreenModifiers) { _, _ in if !isLoadingSettings { saveHotkey(.clearScreen) } }
-                .onChange(of: clearScreenKeyCode) { _, _ in if !isLoadingSettings { saveHotkey(.clearScreen) } }
+                .onChange(of: clearScreenModifiers) { _, _ in saveHotkey(.clearScreen) }
+                .onChange(of: clearScreenKeyCode) { _, _ in saveHotkey(.clearScreen) }
 
                 SettingsSectionHeader(title: "窗口管理快捷键")
 
@@ -503,12 +544,10 @@ struct HotkeySettingsView: View {
     }
     
     private func loadSettings() {
-        isLoadingSettings = true
-        defer { isLoadingSettings = false }
         if let settings = appSettings.first {
             setScreenKeyCode = UInt32(settings.setScreenKeyCode)
             clearScreenKeyCode = UInt32(settings.clearScreenKeyCode)
-            
+
             setScreenModifiers = modifiersFromCarbon(settings.setScreenModifiers)
             clearScreenModifiers = modifiersFromCarbon(settings.clearScreenModifiers)
         }
@@ -534,14 +573,31 @@ struct HotkeySettingsView: View {
     
     private func saveHotkey(_ type: HotkeyType) {
         if let settings = appSettings.first {
+            // 一次 switch 取出该类型对应的持久化字段 keyPath 与 UI 当前值，
+            // 比较与写回共用 keyPath——避免同一 switch 在取值/比较/写回处三度重复
+            let keyCodePath: ReferenceWritableKeyPath<AppSettings, Int32>
+            let modifiersPath: ReferenceWritableKeyPath<AppSettings, UInt32>
+            let uiKeyCode: Int32
+            let uiModifiers: UInt32
             switch type {
             case .setScreen:
-                settings.setScreenKeyCode = Int32(setScreenKeyCode)
-                settings.setScreenModifiers = modifiersToCarbon(setScreenModifiers)
+                keyCodePath = \AppSettings.setScreenKeyCode
+                modifiersPath = \AppSettings.setScreenModifiers
+                uiKeyCode = Int32(setScreenKeyCode)
+                uiModifiers = modifiersToCarbon(setScreenModifiers)
             case .clearScreen:
-                settings.clearScreenKeyCode = Int32(clearScreenKeyCode)
-                settings.clearScreenModifiers = modifiersToCarbon(clearScreenModifiers)
+                keyCodePath = \AppSettings.clearScreenKeyCode
+                modifiersPath = \AppSettings.clearScreenModifiers
+                uiKeyCode = Int32(clearScreenKeyCode)
+                uiModifiers = modifiersToCarbon(clearScreenModifiers)
             }
+            // loadSettings 回灌引发的 onChange 与持久化值相同——跳过回写，
+            // 避免每次打开设置页都触发多余的 save + hotkeysUpdated（WindowMover 重注册快捷键）
+            if settings[keyPath: keyCodePath] == uiKeyCode
+                && settings[keyPath: modifiersPath] == uiModifiers { return }
+
+            settings[keyPath: keyCodePath] = uiKeyCode
+            settings[keyPath: modifiersPath] = uiModifiers
             settings.updatedAt = Date()
             // 仅成功时 post 通知——失败时 hotkey 不应被旧值重注册
             do {
@@ -577,6 +633,8 @@ struct AboutView: View {
     @State private var updateStatus: UpdateChecker.UpdateStatus = .idle
     @State private var downloadURL: String = ""
     @State private var releaseNotes: String = ""
+    // 检查失败的具体原因（限流/服务异常等）——error 态原本只回退按钮文案，用户无从知晓失败原因
+    @State private var checkFailedMessage: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -669,8 +727,8 @@ struct AboutView: View {
     }
     
     private var updateButtonText: String {
-        // 文案单一来源：UpdateStatus.displayText（与 AppPopoverView 共用，避免两处不一致）
-        updateStatus.displayText
+        // 展示规则单一来源：UpdateStatus.displayText(failureReason:)（与 AppPopoverView 共用）
+        updateStatus.displayText(failureReason: checkFailedMessage)
     }
     
     private func loadCurrentVersion() {
@@ -698,8 +756,15 @@ struct AboutView: View {
                 } else {
                     updateStatus = .upToDate
                 }
-            case .failure:
-                updateStatus = .error
+            case .failure(let error):
+                // 被新检查抢占（面板也在检查）——静默复位，不误导用户为检查失败
+                if case .superseded = error {
+                    updateStatus = .idle
+                    checkFailedMessage = ""
+                } else {
+                    updateStatus = .error
+                    checkFailedMessage = error.userMessage
+                }
             }
         }
     }

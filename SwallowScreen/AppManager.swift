@@ -62,17 +62,20 @@ class AppManager: ObservableObject {
 
         // 目录扫描为同步 IO（数百个 app + Info.plist 解析），主线程串行执行会卡 UI，
         // 故按目录拆成后台并发任务，完成后再回主线程合并
-        let scanResults = await withTaskGroup(of: [SystemApp].self) { group in
-            for directory in applicationDirectories {
+        // 各任务携带目录序号返回后按序合并——并发完成顺序不定，
+        // 直接 append 会让同 bundleID 的去重结果（先到者优先）依赖完成顺序，
+        // 表现为列表内容/顺序每次启动可能不同
+        let scanResults = await withTaskGroup(of: (Int, [SystemApp]).self) { group in
+            for (index, directory) in applicationDirectories.enumerated() {
                 group.addTask(priority: .userInitiated) {
-                    Self.scanApplications(in: directory)
+                    (index, Self.scanApplications(in: directory))
                 }
             }
-            var collected: [[SystemApp]] = []
+            var collected: [(Int, [SystemApp])] = []
             for await result in group {
                 collected.append(result)
             }
-            return collected
+            return collected.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
         for result in scanResults {
             apps.append(contentsOf: result)
@@ -87,7 +90,13 @@ class AppManager: ObservableObject {
         // localizedStandardCompare：系统标准排序规则，且避免重复构造 Locale
         let basicApps = Array(uniqueApps.values).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         self.installedApps = basicApps
-        self.filteredApps = basicApps
+        // 扫描完成时用户可能已输入搜索词：无条件覆盖会把搜索结果冲掉，
+        // 仅在无搜索词时直接赋值，否则按新列表重新过滤
+        if searchText.isEmpty {
+            self.filteredApps = basicApps
+        } else {
+            filterApps()
+        }
     }
 
     // MARK: - 图标懒加载

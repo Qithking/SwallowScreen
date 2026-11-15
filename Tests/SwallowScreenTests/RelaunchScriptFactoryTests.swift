@@ -52,6 +52,41 @@ final class RelaunchScriptFactoryTests: XCTestCase {
         try assertBashSyntaxValid(script, label: "ZIP 脚本")
     }
 
+    // MARK: - 契约：失败必须弹窗告知（应用已退出，脚本失败不能只写日志静默消失）
+
+    func testScriptsAlertUserOnFailure() throws {
+        for (script, label) in [
+            (RelaunchScriptFactory.makeDMGScript(
+                pid: 1234, dmgPath: dmgPath, targetAppPath: targetAppPath, logPath: logPath
+            ), "DMG"),
+            (RelaunchScriptFactory.makeZipScript(
+                pid: 1234, zipPath: zipPath, targetAppPath: targetAppPath, logPath: logPath
+            ), "ZIP"),
+        ] {
+            XCTAssertTrue(script.contains("fail()"), "\(label) 脚本必须有统一失败出口 fail()")
+            XCTAssertTrue(
+                script.contains("osascript") && script.contains("display dialog"),
+                "\(label) 脚本失败必须 osascript 弹窗告知用户"
+            )
+            // 各失败点必须走 fail() 而非裸 exit 1——exit 1 只允许出现在 fail() 函数体内
+            let allLines = script.split(separator: "\n")
+            guard let failStart = allLines.firstIndex(where: { $0.contains("fail() {") }),
+                  let failEnd = allLines[failStart...].firstIndex(where: {
+                      $0.trimmingCharacters(in: .whitespaces) == "}"
+                  }) else {
+                XCTFail("\(label) 脚本缺少 fail() 定义")
+                return
+            }
+            let bareExits = allLines.enumerated().filter {
+                ($0.offset < failStart || $0.offset > failEnd) && $0.element.contains("exit 1")
+            }
+            XCTAssertTrue(
+                bareExits.isEmpty,
+                "\(label) 脚本存在 fail() 之外的裸 exit 1（用户零反馈）: \(bareExits.map { $0.element })"
+            )
+        }
+    }
+
     // MARK: - 契约：安装前文件预检（bug-58 第一层：路径不存在时快速失败）
 
     func testDMGScriptChecksFileExistsBeforeAttach() throws {
@@ -59,11 +94,11 @@ final class RelaunchScriptFactoryTests: XCTestCase {
             pid: 1234, dmgPath: dmgPath, targetAppPath: targetAppPath, logPath: logPath
         )
         XCTAssertTrue(
-            script.contains("[ ! -f \"\(dmgPath)\" ]"),
+            script.contains("[ ! -f '\(dmgPath)' ]"),
             "挂载前必须预检 DMG 文件存在，缺失时直接退出"
         )
         // 预检必须发生在 attach 之前
-        let guardIndex = try XCTSourceLocation(offsetOf: "[ ! -f \"\(dmgPath)\" ]", in: script)
+        let guardIndex = try XCTSourceLocation(offsetOf: "[ ! -f '\(dmgPath)' ]", in: script)
         let attachIndex = try XCTSourceLocation(offsetOf: "hdiutil attach", in: script)
         XCTAssertLessThan(guardIndex, attachIndex, "文件预检必须先于 hdiutil attach")
     }
@@ -73,7 +108,7 @@ final class RelaunchScriptFactoryTests: XCTestCase {
             pid: 1234, zipPath: zipPath, targetAppPath: targetAppPath, logPath: logPath
         )
         XCTAssertTrue(
-            script.contains("[ ! -f \"\(zipPath)\" ]"),
+            script.contains("[ ! -f '\(zipPath)' ]"),
             "解压前必须预检 ZIP 文件存在，缺失时直接退出"
         )
     }
@@ -167,17 +202,17 @@ final class RelaunchScriptFactoryTests: XCTestCase {
         for (script, label) in [(zipScript, "ZIP"), (dmgScript, "DMG")] {
             // 第一步 mv（改名暂存 .old）必须有守卫——失败时 target 原样保留
             let firstMv = try XCTSourceLocation(
-                offsetOf: "mv \"\(targetAppPath)\" \"\(targetAppPath).old\"", in: script
+                offsetOf: "mv '\(targetAppPath)' '\(targetAppPath).old'", in: script
             )
             let firstGuard = try XCTSourceLocation(offsetOf: "旧版本改名失败", in: script)
             XCTAssertLessThan(firstMv, firstGuard, "\(label) 第一步 mv 必须有错误守卫")
 
             // 第二步 mv（.new 就位）必须有守卫，且失败路径先移回 .old 恢复旧版本
             let secondMv = try XCTSourceLocation(
-                offsetOf: "mv \"\(targetAppPath).new\" \"\(targetAppPath)\"", in: script
+                offsetOf: "mv '\(targetAppPath).new' '\(targetAppPath)'", in: script
             )
             let restoreMv = try XCTSourceLocation(
-                offsetOf: "mv \"\(targetAppPath).old\" \"\(targetAppPath)\"", in: script
+                offsetOf: "mv '\(targetAppPath).old' '\(targetAppPath)'", in: script
             )
             XCTAssertLessThan(firstGuard, secondMv, "\(label) 第二步 mv 必须在第一步守卫之后")
             XCTAssertLessThan(
@@ -187,11 +222,40 @@ final class RelaunchScriptFactoryTests: XCTestCase {
             // rm -rf ".old"（独立一行，不含 .new 的开头清理行）必须在恢复路径之后——
             // 任何失败分支都不得触达删除 .old 的语句
             let finalRm = try XCTSourceLocation(
-                offsetOf: "rm -rf \"\(targetAppPath).old\"", in: script
+                offsetOf: "rm -rf '\(targetAppPath).old'", in: script
             )
             XCTAssertLessThan(
                 restoreMv, finalRm, "\(label) 删除 .old 必须仅在两步 mv 均成功的路径上"
             )
+        }
+    }
+
+    // MARK: - 契约：路径一律 shell 单引号转义（suggestedFilename 不可信）
+
+    // 下载文件名来自服务器（Content-Disposition），含 $(...) 时双引号内插会被执行
+    // （命令注入），含 " 时破坏脚本语法——所有路径必须走 shellQuote 单引号字面量
+
+    func testPathsAreShellQuotedAgainstInjection() throws {
+        let evil = "/tmp/evil $(touch /tmp/SwallowScreenC3Pwned) te'st\"x.dmg"
+        let dmgScript = RelaunchScriptFactory.makeDMGScript(
+            pid: 1234, dmgPath: evil, targetAppPath: targetAppPath, logPath: logPath
+        )
+        let zipScript = RelaunchScriptFactory.makeZipScript(
+            pid: 1234, zipPath: evil, targetAppPath: targetAppPath, logPath: logPath
+        )
+        // 危险路径必须以单引号字面量出现：' 转为 '\' 后 $( ) " 均为纯文本
+        let expectedQuoted = "'/tmp/evil $(touch /tmp/SwallowScreenC3Pwned) te'\\''st\"x.dmg'"
+        XCTAssertTrue(dmgScript.contains(expectedQuoted), "DMG 路径必须单引号字面量转义")
+        XCTAssertTrue(zipScript.contains(expectedQuoted), "ZIP 路径必须单引号字面量转义")
+        // 禁止双引号直接内插残留
+        XCTAssertFalse(dmgScript.contains("\"\(evil)\""), "禁止双引号内插 DMG 路径")
+        XCTAssertFalse(zipScript.contains("\"\(evil)\""), "禁止双引号内插 ZIP 路径")
+        // targetAppPath / logPath 同样必须转义
+        for (script, label) in [(dmgScript, "DMG"), (zipScript, "ZIP")] {
+            XCTAssertTrue(script.contains("'\(targetAppPath)'"), "\(label) targetAppPath 必须转义")
+            XCTAssertTrue(script.contains("'\(logPath)'"), "\(label) logPath 必须转义")
+            // 含 ' 与 " 的路径不得破坏 bash 语法
+            try assertBashSyntaxValid(script, label: "\(label) 危险路径脚本")
         }
     }
 }

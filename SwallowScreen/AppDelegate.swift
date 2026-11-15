@@ -35,6 +35,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var closePanelObserverToken: Any?
     // 点击面板外（其他应用）关闭面板的全局鼠标监听，模拟 NSPopover.transient 行为
     private var outsideClickMonitor: Any?
+    // Cmd+, 拦截 monitor：SwiftUI Settings scene 仅是占位（EmptyView），
+    // 不拦截会让系统快捷键弹出空白设置窗
+    private var cmdCommaMonitor: Any?
     // 面板因 resign key 自动隐藏的单调钟时刻:toggle 用它区分
     // "本次点击引发的自动隐藏"(不重弹)与真正的关闭态(正常打开)
     private var appPanelAutoHiddenAt: TimeInterval = 0
@@ -67,6 +70,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupScreenChangeObserver()
         setupGlobalHotKeys()
         setupSettingsWindowObserver()
+        installCmdCommaMonitor()
         setupOutsideClickMonitor()
 
         // 初始化窗口管理器（最后初始化，确保 modelContainer 已就绪）；
@@ -213,13 +217,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @ViewBuilder
     private func makePanelContent(container: ModelContainer) -> some View {
-        // windowMover 延迟 1s 初始化，正常面板打开时必然就绪；未就绪时不渲染面板内容
         if let windowMover {
             AppPopoverView()
                 .modelContainer(container)
                 .environmentObject(appManager)
                 .environmentObject(screenManager)
                 .environmentObject(windowMover)
+        } else {
+            // windowMover 延迟 1s 初始化：启动后立即打开面板时显示初始化占位而非空白，
+            // 就绪后由 setupWindowMover 重建面板内容替换占位
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("正在初始化…")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -354,6 +367,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
     }
+
+    /// 拦截 Cmd+,（系统"Settings…"菜单快捷键）：SwiftUI 的 Settings scene 仅是占位（EmptyView），
+    /// 默认会弹出空白设置窗口；拦截后转发给自定义设置窗口，与面板"设置"入口行为一致
+    private func installCmdCommaMonitor() {
+        cmdCommaMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            // ',' keyCode = 44；排除 shift/option/control 组合，避免误拦其他快捷键
+            let mods = event.modifierFlags
+            if event.keyCode == 44,
+               mods.contains(.command),
+               !mods.contains(.shift),
+               !mods.contains(.option),
+               !mods.contains(.control) {
+                Task { @MainActor in
+                    self?.openSettingsWindow()
+                }
+                return nil
+            }
+            return event
+        }
+    }
     
     private func setupWindowMover() {
         // 防止权限授予瞬间与初始延时的 setupWindowMover 重入
@@ -365,6 +398,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         windowMover = WindowMover(screenManager: screenManager)
         windowMover?.configure(modelContext: container.mainContext)
+
+        // 面板可能在 windowMover 就绪前已打开（显示占位视图）：此刻重建面板内容，
+        // 把占位替换为真实面板；否则占位会一直停留到面板关闭
+        if let panel = appPanel, panel.isVisible {
+            panel.contentView = NSHostingView(rootView: makePanelContent(container: container))
+        }
 
         if windowMover?.startMonitoring() == true {
             permissionCheckTimer?.cancel()
@@ -668,7 +707,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let context = container.mainContext
             let descriptor = FetchDescriptor<AppInfo>(predicate: #Predicate { $0.bundleIdentifier == bundleID })
 
-            if let existing = try? context.fetch(descriptor).first {
+            // fetch 失败（Store 异常）必须与「记录不存在」区分——try? 会把异常吞成"未配置"，
+            // 用户按快捷键清屏无任何反馈（与 setCurrentAppScreen 的 fetch 处理一致）
+            let existing: AppInfo?
+            do {
+                existing = try context.fetch(descriptor).first
+            } catch {
+                os_log("clearCurrentAppScreen fetch 失败: %{public}@（bundleID=%{public}@，跳过本次清除）",
+                       log: OSLog.default, type: .error, error.localizedDescription, bundleID)
+                return
+            }
+
+            if let existing {
                 existing.updateScreen(screenID: nil, screenName: nil, screenSerialNumber: nil)
                 // 清屏时同步关闭 pinToScreen——pin 需要目标屏幕才有意义，
                 // 否则 pinToScreen=true 但无目标屏幕是无效状态
@@ -819,6 +869,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let monitor = outsideClickMonitor {
             NSEvent.removeMonitor(monitor)
         }
+        if let monitor = cmdCommaMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
     }
 
     /// 集中清理所有 NotificationCenter observer——deinit 与 applicationWillTerminate 共用
@@ -851,6 +904,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let monitor = outsideClickMonitor {
             NSEvent.removeMonitor(monitor)
             outsideClickMonitor = nil
+        }
+        if let monitor = cmdCommaMonitor {
+            NSEvent.removeMonitor(monitor)
+            cmdCommaMonitor = nil
         }
     }
 }

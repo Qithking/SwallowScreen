@@ -22,6 +22,28 @@ final class UpdateChecker {
         case invalidURL
         case network(Error)
         case parseFailed
+        // GitHub 403/429 限流——区别于一般网络错误，稍后重试即可
+        case rateLimited
+        // GitHub 服务端错误（5xx）
+        case server(statusCode: Int)
+        // Release 未提供可安装的 .dmg/.zip 资产
+        case noInstallableAsset
+        // 被新的 check 抢占（面板与 AboutView 先后打开都会触发检查）——
+        // 被抢占方必须收到回调才能复位 UI，否则永久卡"检查中..."
+        case superseded
+
+        /// 检查失败的用户可读文案——调用方 UI 展示的单一来源（与 UpdateStatus.displayText 同模式）
+        var userMessage: String {
+            switch self {
+            case .invalidURL: return "更新地址无效"
+            case .rateLimited: return "GitHub 限流，稍后再试"
+            case .server(let code): return "服务异常(\(code))"
+            case .network: return "网络错误"
+            case .parseFailed: return "响应解析失败"
+            case .noInstallableAsset: return "未找到安装包"
+            case .superseded: return "检查已被新的检查取代"
+            }
+        }
     }
 
     /// 5 个 case 对应 UI 状态机：未检查 / 检查中 / 有更新 / 已是最新 / 检查失败
@@ -42,6 +64,13 @@ final class UpdateChecker {
             case .available: return "发现新版本"
             case .upToDate: return "已是最新"
             }
+        }
+
+        /// 按钮文案的最终展示规则（AppPopoverView 与 AboutView 共用的单一来源）：
+        /// error 态优先显示具体失败原因（如「GitHub 限流，稍后再试」），无原因时回落默认文案
+        func displayText(failureReason: String) -> String {
+            if self == .error && !failureReason.isEmpty { return failureReason }
+            return displayText
         }
     }
 
@@ -65,16 +94,27 @@ final class UpdateChecker {
         self.session = session
     }
 
+    // 当前进行中检查的 completion——被新 check 抢占时以 superseded 回调旧方，
+    // 否则旧方 UI 永久卡在 checking 态（completion 被 cancelled 分支静默过滤）
+    private var activeCompletion: ((Result<UpdateInfo, CheckError>) -> Void)?
+
     /// 主动取消正在进行的 check（completion 会以 NSURLErrorCancelled 被回调，check 内部已静默过滤）
     func cancel() {
         task?.cancel()
         task = nil
+        // 清空 activeCompletion：主动取消方 UI 自行复位，悬挂的旧 completion
+        // 不应在未来某次 check 抢占时被误回调
+        activeCompletion = nil
     }
 
     /// 异步执行更新检查。completion 始终在主线程上调用。
-    /// 同实例再次 check 会自动取消前一个 task
+    /// 同实例再次 check 会自动取消前一个 task，并以 superseded 通知被抢占方
     func check(completion: @escaping (Result<UpdateInfo, CheckError>) -> Void) {
         task?.cancel()
+        activeCompletion?(.failure(.superseded))
+        // 登记当前 completion（check 在主线程调用，与抢占回调同线程无并发问题）：
+        // 下一次 check 抢占时以 superseded 回调本方
+        activeCompletion = completion
 
         var request = URLRequest(url: Self.apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -96,7 +136,18 @@ final class UpdateChecker {
             guard let data = data,
                   let http = response as? HTTPURLResponse,
                   (200..<300).contains(http.statusCode) else {
-                deliver(.failure(.parseFailed))
+                // 区分限流/服务端错误——一律归 parseFailed 会让用户无从判断（限流稍后再试即可）
+                if let http = response as? HTTPURLResponse {
+                    if http.statusCode == 403 || http.statusCode == 429 {
+                        deliver(.failure(.rateLimited))
+                    } else if http.statusCode >= 500 {
+                        deliver(.failure(.server(statusCode: http.statusCode)))
+                    } else {
+                        deliver(.failure(.parseFailed))
+                    }
+                } else {
+                    deliver(.failure(.parseFailed))
+                }
                 return
             }
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -105,8 +156,11 @@ final class UpdateChecker {
                 return
             }
             let raw = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+            // 剥离预发布后缀（如 1.0.2-rc.1 → 1.0.2）再比较——numeric 比较会把后缀串
+            // 误判为更大版本；预发布段不参与"是否有更新"判定，latestVersion 仍显示完整 tag
+            let baseVersion = raw.split(separator: "-", maxSplits: 1).first.map(String.init) ?? raw
             // 数值化字符串比较：1.2.10 > 1.2.9（普通字符串比较会误判）
-            let hasUpdate = raw.compare(Self.currentVersion, options: .numeric) == .orderedDescending
+            let hasUpdate = baseVersion.compare(Self.currentVersion, options: .numeric) == .orderedDescending
             let downloadURL: String
             if let assets = json["assets"] as? [[String: Any]] {
                 // 优先匹配 .dmg / .zip 安装包，避免取到 .sha256 校验文件或源码 tarball
@@ -118,6 +172,12 @@ final class UpdateChecker {
                 downloadURL = (matchedAsset?["browser_download_url"] as? String) ?? ""
             } else {
                 downloadURL = ""
+            }
+            guard !hasUpdate || !downloadURL.isEmpty else {
+                // 有更新但 Release 未提供可安装资产——空 URL 按 success 返回会让
+                // 下载窗口拿到空地址，必须显式失败
+                deliver(.failure(.noInstallableAsset))
+                return
             }
             deliver(.success(UpdateInfo(
                 latestVersion: raw,

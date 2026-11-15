@@ -36,6 +36,8 @@ struct AppPopoverView: View {
     @State private var updateStatus: UpdateChecker.UpdateStatus = .idle
     @State private var latestVersion: String = ""
     @State private var downloadURL: String = ""
+    // 检查失败的具体原因（限流/服务异常等）——error 态原本只回退按钮文案，用户无从知晓失败原因
+    @State private var checkFailedMessage: String = ""
 
     var body: some View {
         ZStack {
@@ -88,6 +90,14 @@ struct AppPopoverView: View {
             checkWelcomeTip()
             if appSettings.first?.checkUpdateOnLaunch ?? true {
                 autoCheckForUpdate()
+            }
+        }
+        .onDisappear {
+            // 检查进行中关面板：取消检查并重置「启动时检查」标志——
+            // 结果随 view 销毁而丢失，重开面板时重新自动检查，保证用户能看到检查结果
+            if updateStatus == .checking {
+                UpdateChecker.shared.cancel()
+                Self.hasAutoCheckedOnLaunch = false
             }
         }
     }
@@ -439,8 +449,56 @@ struct AppPopoverView: View {
         return nil
     }
     
+    /// 修改前的内存快照——save 失败时按此回滚，保持 UI 与持久化一致
+    private struct AppInfoSnapshot {
+        let info: AppInfo?              // 修改前已存在的记录（nil = 本次新建）
+        let pinned: Bool
+        let enabled: Bool
+        let screenID: UInt32?
+        let screenName: String?
+        let screenSerialNumber: String?
+        // 本次修改是否触碰屏幕字段——未触碰时回滚不得调 updateScreen
+        // （nil 是合法旧值，误传会把已有配置清空）
+        let screenChanged: Bool
+    }
+
+    /// save 失败的统一处理：日志 + 弹窗 + 按快照回滚内存值（新建记录直接删除，未落盘）
+    private func rollbackAppInfoAfterSaveFailure(
+        context: String, error: Error, snapshot: AppInfoSnapshot, insertedNew: AppInfo?
+    ) {
+        os_log("%{public}@ save 失败: %{public}@", log: OSLog.default, type: .error,
+               context, error.localizedDescription)
+        AppDelegate.showSaveErrorAlert(error: error)
+        if let info = snapshot.info {
+            if snapshot.screenChanged {
+                info.updateScreen(
+                    screenID: snapshot.screenID,
+                    screenName: snapshot.screenName,
+                    screenSerialNumber: snapshot.screenSerialNumber
+                )
+            }
+            info.updatePinToScreen(snapshot.pinned)
+            info.isEnabled = snapshot.enabled
+        } else if let newInfo = insertedNew {
+            modelContext.delete(newInfo)
+        }
+    }
+
     private func configureApp(app: SystemApp, screen: ScreenInfo?) {
-        if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+        // 修改前快照，save 失败时回滚内存值，保持 UI 与持久化一致（本次会改屏幕字段）
+        let oldInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier })
+        let snapshot = AppInfoSnapshot(
+            info: oldInfo,
+            pinned: oldInfo?.pinToScreen ?? false,
+            enabled: oldInfo?.isEnabled ?? false,
+            screenID: oldInfo?.targetScreenID,
+            screenName: oldInfo?.targetScreenName,
+            screenSerialNumber: oldInfo?.targetScreenSerialNumber,
+            screenChanged: true
+        )
+        var insertedNew: AppInfo? = nil
+
+        if let existingInfo = oldInfo {
             existingInfo.updateScreen(
                 screenID: screen?.id,
                 screenName: screen?.name,
@@ -471,16 +529,18 @@ struct AppPopoverView: View {
                 newInfo.isEnabled = false
             }
             modelContext.insert(newInfo)
+            insertedNew = newInfo
         }
 
-        // 失败时 os_log + 弹 NSAlert；原 try? 静默吞错，屏幕配置修改丢失也无感知
+        // 失败时 os_log + 弹 NSAlert，并回滚内存值（新建记录直接删除，未落盘）
         do {
             try modelContext.save()
             // 选屏后通知 WindowMover 刷新缓存和 pinObserver，与 updatePinToScreen 对齐
             NotificationCenter.default.post(name: .pinToScreenChanged, object: nil)
         } catch {
-            os_log("configureApp save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
-            AppDelegate.showSaveErrorAlert(error: error)
+            rollbackAppInfoAfterSaveFailure(
+                context: "configureApp", error: error, snapshot: snapshot, insertedNew: insertedNew
+            )
         }
     }
     
@@ -492,7 +552,19 @@ struct AppPopoverView: View {
     }
     
     private func updatePinToScreen(app: SystemApp, pinned: Bool) {
-        if let existingInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
+        // 修改前快照，save 失败时回滚内存值——否则 UI 显示新状态而持久化是旧值，
+        // getIsPinToScreen 等后续读取与缓存不一致（本次不改屏幕字段，screenChanged=false）
+        let oldInfo = appInfos.first(where: { $0.bundleIdentifier == app.bundleIdentifier })
+        let snapshot = AppInfoSnapshot(
+            info: oldInfo,
+            pinned: oldInfo?.pinToScreen ?? false,
+            enabled: oldInfo?.isEnabled ?? false,
+            screenID: nil, screenName: nil, screenSerialNumber: nil,
+            screenChanged: false
+        )
+        var insertedNew: AppInfo? = nil
+
+        if let existingInfo = oldInfo {
             // 启用 pin 时校验是否已配目标屏——无 targetScreen 的 pin 是静默无效操作
             // （写库成功但 resolveTargetFrame 返回 nil → 静默跳过），此处显式拒绝并告警
             if pinned && existingInfo.targetScreenID == nil
@@ -536,14 +608,18 @@ struct AppPopoverView: View {
                 pinToScreen: pinned
             )
             modelContext.insert(newInfo)
+            insertedNew = newInfo
         }
 
-        // 与 setCurrentAppScreen / clearCurrentAppScreen 路径一致——失败时弹 NSAlert
+        // 与 setCurrentAppScreen / clearCurrentAppScreen 路径一致——失败时弹 NSAlert，
+        // 并回滚内存值（新建记录直接删除，未落盘）；失败仍继续 post 通知，
+        // 让 WindowMover 缓存与 DB（旧值）重新对齐
         do {
             try modelContext.save()
         } catch {
-            os_log("updatePinToScreen save 失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
-            AppDelegate.showSaveErrorAlert(error: error)
+            rollbackAppInfoAfterSaveFailure(
+                context: "updatePinToScreen", error: error, snapshot: snapshot, insertedNew: insertedNew
+            )
         }
 
         // 启用或关闭固定屏幕时，立即触发检查
@@ -568,13 +644,20 @@ struct AppPopoverView: View {
     
 
     private var updateButtonText: String {
-        // 文案单一来源：UpdateStatus.displayText（与 AboutView 共用，避免两处不一致）
-        updateStatus.displayText
+        // 展示规则单一来源：UpdateStatus.displayText(failureReason:)（与 AboutView 共用）
+        updateStatus.displayText(failureReason: checkFailedMessage)
     }
     
-    // 自动检查更新（启动时调用）
+    // 「启动时检查更新」语义：应用生命周期内仅首次打开面板时检查一次。
+    // AppPopoverView 每次显示都重建 hostingView（onAppear 重新触发），@State 无法跨面板记忆，
+    // 故用 static 标志记住本次运行是否已自动检查
+    private static var hasAutoCheckedOnLaunch = false
+
+    // 自动检查更新（启动后首次打开面板时调用）
     // AppPopoverView 是 struct，闭包按值捕获，无需 [weak self]
     private func autoCheckForUpdate() {
+        guard !Self.hasAutoCheckedOnLaunch else { return }
+        Self.hasAutoCheckedOnLaunch = true
         guard !isCheckingUpdate else { return }
         isCheckingUpdate = true
         updateStatus = .checking
@@ -586,8 +669,15 @@ struct AppPopoverView: View {
                 downloadURL = info.downloadURL
                 updateStatus = .available
                 showUpdateAlert = true
-            case .failure:
-                updateStatus = .error
+            case .failure(let error):
+                // 被新检查抢占（另一 UI 也在检查）——静默复位，不误导用户为检查失败
+                if case .superseded = error {
+                    updateStatus = .idle
+                    checkFailedMessage = ""
+                } else {
+                    updateStatus = .error
+                    checkFailedMessage = error.userMessage
+                }
             case .success:
                 updateStatus = .upToDate
             }
@@ -613,12 +703,19 @@ struct AppPopoverView: View {
                     updateStatus = .upToDate
                     showUpToDateAlert = true
                 }
-            case .failure:
-                updateStatus = .error
+            case .failure(let error):
+                // 被新检查抢占（另一 UI 也在检查）——静默复位，不误导用户为检查失败
+                if case .superseded = error {
+                    updateStatus = .idle
+                    checkFailedMessage = ""
+                } else {
+                    updateStatus = .error
+                    checkFailedMessage = error.userMessage
+                }
             }
         }
     }
-    
+
     private func openDownloadWindow() {
         guard let url = URL(string: downloadURL) else { return }
         // 按设置的更新方式解析下载渠道：官网直连 / gh-proxy 加速（脏数据兜底官网）

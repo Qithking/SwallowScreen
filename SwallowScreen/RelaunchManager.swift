@@ -52,8 +52,22 @@ final class RelaunchManager {
         if currentAppURL.path.hasPrefix("/Applications/") {
             targetAppURL = currentAppURL
         } else {
-            targetAppURL = URL(fileURLWithPath: "/Applications")
+            // 应用不在 /Applications（如 ~/Applications、开发构建目录）——
+            // 静默换目标会让原位置副本不被更新且无任何提示，必须明示并征得用户同意
+            let fallbackURL = URL(fileURLWithPath: "/Applications")
                 .appendingPathComponent(currentAppURL.lastPathComponent)
+            let alert = NSAlert()
+            alert.messageText = "应用不在 /Applications"
+            alert.informativeText = "当前应用位于：\n\(currentAppURL.path)\n\n更新将安装到 /Applications 并从那里启动，当前位置的副本不会被更新。是否继续？"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "继续更新")
+            alert.addButton(withTitle: "取消")
+            if alert.runModal() != .alertFirstButtonReturn {
+                // 用户取消——降级为打开安装包，由用户手动处理
+                NSWorkspace.shared.open(downloadURL)
+                return
+            }
+            targetAppURL = fallbackURL
         }
 
         let scriptURL = FileManager.default.temporaryDirectory

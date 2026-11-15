@@ -106,19 +106,28 @@ struct DownloadWindowContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("正在下载 v\(version)")
+                    // 复用已完成下载（completedFile 命中）时状态为 completed，
+                    // 标题仍写死"正在下载"会与右侧"下载完成"状态自相矛盾
+                    Text(downloadStatus == .completed ? "下载完成 v\(version)" : "正在下载 v\(version)")
                         .font(.headline)
 
                     if downloadStatus == .downloading {
                         VStack(alignment: .leading, spacing: 3) {
-                            ProgressView(value: downloadProgress)
-                                .progressViewStyle(.linear)
-                                .frame(height: 8)
+                            if downloadProgress < 0 {
+                                // 服务器未返回总大小（无 Content-Length）——转圈不确定态，
+                                // 无从计算百分比与进度条
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                ProgressView(value: downloadProgress)
+                                    .progressViewStyle(.linear)
+                                    .frame(height: 8)
 
-                            Text("\(Int(downloadProgress * 100))%")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .monospacedDigit()
+                                Text("\(Int(downloadProgress * 100))%")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .monospacedDigit()
+                            }
                         }
                     } else if downloadStatus == .completed {
                         HStack(spacing: 4) {
@@ -212,9 +221,24 @@ struct DownloadWindowContentView: View {
         .onAppear {
             startDownload()
         }
+        // 标题栏红点关闭不走 cancelDownload——监听窗口关闭，下载中则取消，
+        // 避免"窗口已关下载仍在后台跑"；取消/完成/安装路径 closeWindow 时状态
+        // 已非 downloading，不会误触发
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            guard let closingWindow = note.object as? NSWindow, closingWindow === windowRef,
+                  downloadStatus == .downloading else { return }
+            DownloadManager.shared.cancel(urlKey: downloadURL.absoluteString)
+        }
     }
 
     private func startDownload() {
+        // 同 URL 已有完成的下载且文件仍在（窗口复用/重试场景）——直接展示完成态，
+        // 不作废已有结果重新下载
+        if let existing = DownloadManager.shared.completedFile(for: downloadURL.absoluteString) {
+            downloadedFileURL = existing
+            downloadStatus = .completed
+            return
+        }
         downloadStatus = .downloading
         downloadProgress = 0
         errorMessage = ""
@@ -309,11 +333,24 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
     private var session: URLSession?
     private var activeTasks: [String: URLSessionDownloadTask] = [:] // urlKey -> task
     private var callbacks: [String: TaskCallbacks] = [:]
+    // urlKey → 最近一次成功下载的本地文件（窗口复用时直接展示完成态，不作废重下）
+    // 生命周期与应用进程一致：条目仅数十字节，无上限增长风险；文件本身在系统临时目录
+    // 由系统清理，completedFile(for:) 读取时有 fileExists 兜底，文件被清理后自动视为未下载
+    private var completedFiles: [String: URL] = [:]
 
     struct TaskCallbacks {
         var onProgress: (Double) -> Void
         var onComplete: (URL?) -> Void
         var onError: (String) -> Void
+    }
+
+    /// 下载失败统一出口：上报错误并清理该 URL 的回调与 task 记录
+    /// （调用方均在 delegate 的 MainActor Task 内；didCompleteWithError 的身份校验不在本方法——
+    ///  它必须先于任何清理执行，语义不同）
+    private func reportErrorAndCleanup(urlKey: String, message: String) {
+        callbacks[urlKey]?.onError(message)
+        callbacks[urlKey] = nil
+        activeTasks[urlKey] = nil
     }
 
     func download(from url: URL,
@@ -349,6 +386,13 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
         task?.resume()
     }
 
+    /// 查询同 URL 最近一次成功下载且文件仍在的结果（文件可能已被系统/用户清理）
+    func completedFile(for urlKey: String) -> URL? {
+        guard let fileURL = completedFiles[urlKey],
+              FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        return fileURL
+    }
+
     func cancel(urlKey: String) {
         if let task = activeTasks[urlKey] {
             task.cancel()
@@ -363,6 +407,25 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let urlKey = downloadTask.taskDescription else { return }
+
+        // 服务器/代理返回错误时 URLSession 也走"成功"路径，body 是 HTML 错误页——
+        // 状态码与内容类型必须校验，否则错误页会被存成 .dmg 并提示"下载完成"
+        if let http = downloadTask.response as? HTTPURLResponse {
+            if !(200..<300).contains(http.statusCode) {
+                Task { @MainActor [weak self] in
+                    self?.reportErrorAndCleanup(urlKey: urlKey, message: "服务器返回 \(http.statusCode)，下载中止")
+                }
+                return
+            }
+            let mime = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+            if mime.contains("text/html") {
+                Task { @MainActor [weak self] in
+                    self?.reportErrorAndCleanup(urlKey: urlKey, message: "下载内容异常（HTML 页面），请检查网络或代理设置")
+                }
+                return
+            }
+        }
+
         let fileManager = FileManager.default
         // 使用临时目录而非 Documents——下载的安装包是一次性的，不需要持久保存
         let tempDir = fileManager.temporaryDirectory.appendingPathComponent("SwallowScreenUpdates", isDirectory: true)
@@ -370,14 +433,18 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
             try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
         } catch {
             Task { @MainActor [weak self] in
-                self?.callbacks[urlKey]?.onError("无法创建临时目录：\(error.localizedDescription)")
-                self?.callbacks[urlKey] = nil
-                self?.activeTasks[urlKey] = nil
+                self?.reportErrorAndCleanup(urlKey: urlKey, message: "无法创建临时目录：\(error.localizedDescription)")
             }
             return
         }
 
-        let fileName = downloadTask.response?.suggestedFilename ?? location.lastPathComponent
+        // suggestedFilename 来自服务器响应头（第三方渠道下完全可控），URLSession 不消毒
+        // ".." 与 "/"——必须 basename 清洗，防路径穿越把文件写到下载目录之外
+        let rawName = downloadTask.response?.suggestedFilename ?? location.lastPathComponent
+        var fileName = rawName.lastPathComponent
+        if fileName.isEmpty || fileName == "." {
+            fileName = "SwallowScreen-update"
+        }
         let destinationURL = tempDir.appendingPathComponent(fileName)
 
         do {
@@ -388,23 +455,28 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
         } catch {
             os_log("保存下载文件失败: %{public}@", log: OSLog.default, type: .error, error.localizedDescription)
             Task { @MainActor [weak self] in
-                self?.callbacks[urlKey]?.onError("保存文件失败: \(error.localizedDescription)")
-                self?.callbacks[urlKey] = nil
-                self?.activeTasks[urlKey] = nil
+                self?.reportErrorAndCleanup(urlKey: urlKey, message: "保存文件失败: \(error.localizedDescription)")
             }
             return
         }
 
         Task.detached(priority: .utility) {
-            // 清理之前的旧更新下载文件（保留当前文件）
+            // 清理之前的旧更新下载文件（保留当前文件）；
+            // relaunch.log 必须排除——RelaunchManager 把安装失败取证日志放在本目录，
+            // 误删会让 bug-58 类问题的唯一取证手段失效
             if let contents = try? FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.contentModificationDateKey]) {
-                for file in contents where file != destinationURL {
+                for file in contents where file != destinationURL && file.lastPathComponent != "relaunch.log" {
                     try? FileManager.default.removeItem(at: file)
                 }
             }
             // 集中在同一个 MainActor.run：onComplete 与 callbacks/activeTasks 清理一起完成，
             // 避免与 didCompleteWithError 的清理互相冲突
             await MainActor.run { [weak self] in
+                // 与 didCompleteWithError 同款身份校验：用户点取消后此完成回调才到达时
+                // （cancel 已清 activeTasks），已取消任务的结果不得写入 completedFiles
+                // 产生"幽灵完成"复用、也不得误报 UI
+                guard self?.activeTasks[urlKey] === downloadTask else { return }
+                self?.completedFiles[urlKey] = destinationURL
                 self?.callbacks[urlKey]?.onComplete(destinationURL)
                 self?.callbacks[urlKey] = nil
                 self?.activeTasks[urlKey] = nil
@@ -414,29 +486,35 @@ class DownloadManager: NSObject, URLSessionDownloadDelegate {
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let urlKey = downloadTask.taskDescription else { return }
-        if totalBytesExpectedToWrite > 0 {
-            let progress = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-            Task { @MainActor [weak self] in
-                self?.callbacks[urlKey]?.onProgress(progress)
-            }
+        // 响应无 Content-Length（chunked 传输）时无从计算百分比——以 -1 标记不确定态
+        let progress: Double = totalBytesExpectedToWrite > 0
+            ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+            : -1
+        Task { @MainActor [weak self] in
+            self?.callbacks[urlKey]?.onProgress(progress)
         }
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let urlKey = task.taskDescription else { return }
         Task { @MainActor [weak self] in
-            self?.activeTasks[urlKey] = nil
-            if let error = error {
-                if (error as NSError).code == NSURLErrorCancelled {
-                    return
-                }
-                // 成功路径已清理 callbacks[urlKey]；若为 nil 说明 onComplete 已回调，
-                // 此处不应再 onError，否则同一 urlKey 两个回调都触发，UI 状态错乱
-                guard self?.callbacks[urlKey] != nil else { return }
-                os_log("下载失败: %{public}@", log: self?.log ?? OSLog.default, type: .error, error.localizedDescription)
-                self?.callbacks[urlKey]?.onError(error.localizedDescription)
-                self?.callbacks[urlKey] = nil
+            guard let self else { return }
+            // 同 URL 重下后 activeTasks 已指向新 task——旧 task 的收尾回调不得
+            // 误删新 task 的记录（否则后续无法真正取消新下载）、不得误报给新 UI
+            guard self.activeTasks[urlKey] === task else { return }
+            self.activeTasks[urlKey] = nil
+            guard let error = error else { return }
+            if (error as NSError).code == NSURLErrorCancelled {
+                // 用户主动取消（cancel(urlKey:) 已清 callbacks，此处幂等兜底）
+                self.callbacks[urlKey] = nil
+                return
             }
+            // 成功路径已清理 callbacks[urlKey]；若为 nil 说明 onComplete 已回调，
+            // 此处不应再 onError，否则同一 urlKey 两个回调都触发，UI 状态错乱
+            guard self.callbacks[urlKey] != nil else { return }
+            os_log("下载失败: %{public}@", log: self.log, type: .error, error.localizedDescription)
+            self.callbacks[urlKey]?.onError(error.localizedDescription)
+            self.callbacks[urlKey] = nil
         }
     }
 
